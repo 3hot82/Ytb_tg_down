@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import subprocess
 from pathlib import Path
@@ -15,7 +16,7 @@ from redis.asyncio import Redis
 from .config import settings
 from .downloader import DownloadRejected, cleanup_file, describe_media, download_media
 from .models import MediaJob
-from .redis_keys import ACTIVE_JOBS, JOB_PREFIX, MEDIA_CACHE_PREFIX, PAUSE_FLAG, PENDING_JOBS_CHAT_PREFIX, PENDING_JOBS_USER_PREFIX, URL_INFLIGHT_PREFIX
+from .redis_keys import ACTIVE_JOBS, JOB_PREFIX, MEDIA_CACHE_PREFIX, PAUSE_FLAG, PENDING_JOBS_CHAT_PREFIX, PENDING_JOBS_USER_PREFIX, URL_INFLIGHT_PREFIX, URL_WAITERS_PREFIX
 
 log = logging.getLogger(__name__)
 
@@ -227,6 +228,27 @@ async def process_job(redis: Redis, bot: Bot, job: MediaJob) -> None:
                     cleanup_file(item.thumbnail_path)
                 if item.cover_path:
                     cleanup_file(item.cover_path)
+        # Send cached result to waiters who requested same URL while it was downloading
+        waiter_key = f"{URL_WAITERS_PREFIX}{job.url}"
+        waiter_raws = await redis.smembers(waiter_key)
+        if waiter_raws:
+            cache_raw = await redis.get(f"{MEDIA_CACHE_PREFIX}{job.url}")
+            if cache_raw:
+                media_type, file_id, _ = (cache_raw.split("\t", 2) + [None, None, None])[:3]
+                if media_type in {"photo", "video", "document"} and file_id:
+                    for waiter_raw in waiter_raws:
+                        try:
+                            waiter = json.loads(waiter_raw)
+                            if media_type == "photo":
+                                await bot.send_photo(waiter["chat_id"], file_id, reply_to_message_id=waiter.get("message_id"))
+                            elif media_type == "video":
+                                await bot.send_video(waiter["chat_id"], file_id, reply_to_message_id=waiter.get("message_id"), supports_streaming=True)
+                            else:
+                                await bot.send_document(waiter["chat_id"], file_id, reply_to_message_id=waiter.get("message_id"))
+                            log.info("sent cached to waiter chat=%s url=%s", waiter["chat_id"], job.url)
+                        except TelegramBadRequest as exc:
+                            log.warning("failed to send cached to waiter chat=%s url=%s: %s", waiter.get("chat_id"), job.url, exc)
+            await redis.delete(waiter_key)
         await redis.hdel(ACTIVE_JOBS, job.id)
         await redis.delete(f"{URL_INFLIGHT_PREFIX}{job.url}")
         await _release_pending(redis, job)

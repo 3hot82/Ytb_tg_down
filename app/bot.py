@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 from io import BytesIO
 import re
@@ -19,7 +20,7 @@ from redis.asyncio import Redis
 
 from .config import settings
 from .models import MediaJob
-from .redis_keys import JOB_PREFIX, MEDIA_CACHE_PREFIX, PAUSE_FLAG, PENDING_JOBS_CHAT_PREFIX, PENDING_JOBS_USER_PREFIX, URL_INFLIGHT_PREFIX
+from .redis_keys import JOB_PREFIX, MEDIA_CACHE_PREFIX, PAUSE_FLAG, PENDING_JOBS_CHAT_PREFIX, PENDING_JOBS_USER_PREFIX, URL_INFLIGHT_PREFIX, URL_WAITERS_PREFIX
 
 log = logging.getLogger(__name__)
 
@@ -224,6 +225,7 @@ async def _queue_urls(message: Message, urls: list[str], *, force_download: bool
 
     # Dedup URLs already in-flight (queued or being downloaded).
     # force_download bypasses the check and sets fresh inflight lock.
+    # If URL is already inflight, register as waiter — worker will auto-send.
     filtered_urls: list[str] = []
     inflight_ttl = max(settings.job_ttl_seconds, settings.pending_job_ttl_seconds)
     for url in queue_urls:
@@ -232,7 +234,17 @@ async def _queue_urls(message: Message, urls: list[str], *, force_download: bool
         else:
             locked = await redis.set(f"{URL_INFLIGHT_PREFIX}{url}", "1", nx=True, ex=inflight_ttl)
             if not locked:
-                log.debug("url already in-flight, skipping: %s", url)
+                # URL already queued/downloading — register waiter for auto-send
+                waiter_key = f"{URL_WAITERS_PREFIX}{url}"
+                waiter = json.dumps({"chat_id": message.chat.id, "message_id": message.message_id})
+                await redis.sadd(waiter_key, waiter)
+                await redis.expire(waiter_key, inflight_ttl)
+                # Check cache one more time in case download finished between queue and now
+                if await _try_send_cached(message, url):
+                    await redis.srem(waiter_key, waiter)
+                    log.info("url now cached, waiter satisfied chat=%s url=%s", message.chat.id, url)
+                else:
+                    log.info("url already in-flight, registered waiter chat=%s url=%s", message.chat.id, url)
                 continue
         filtered_urls.append(url)
     if not filtered_urls:
