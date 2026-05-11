@@ -170,7 +170,9 @@ async def process_job(redis: Redis, bot: Bot, job: MediaJob) -> None:
     try:
         if await _try_send_cached(redis, bot, job):
             return
-        result = await download_media(job.url, job.id)
+        is_admin = job.user_id is not None and job.user_id in settings.admin_ids
+        max_duration = 0 if is_admin else None  # admins skip duration limit
+        result = await download_media(job.url, job.id, max_duration_seconds=max_duration)
         media_info = describe_media(result.path)
         items = result.all_items()
         cache_enabled = len(items) == 1

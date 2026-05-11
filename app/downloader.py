@@ -79,14 +79,16 @@ def _base_opts(workdir: Path) -> dict[str, Any]:
     return opts
 
 
-def _validate_info(info: dict[str, Any], *, allow_images: bool = False) -> None:
+def _validate_info(info: dict[str, Any], *, allow_images: bool = False, max_duration_seconds: int | None = None) -> None:
     if info.get("_type") in {"playlist", "multi_video"} or info.get("entries"):
         raise DownloadRejected("Плейлисты и альбомы пока не поддерживаются.")
     if info.get("is_live") or info.get("live_status") in {"is_live", "is_upcoming"}:
         raise DownloadRejected("Live-видео не поддерживаются.")
-    duration = info.get("duration")
-    if duration and float(duration) > settings.max_duration_seconds:
-        raise DownloadRejected(f"Видео длиннее лимита {settings.max_duration_seconds} сек.")
+    limit = max_duration_seconds if max_duration_seconds is not None else settings.max_duration_seconds
+    if limit > 0:
+        duration = info.get("duration")
+        if duration and float(duration) > limit:
+            raise DownloadRejected(f"Видео длиннее лимита {limit} сек.")
     if not allow_images and info.get("vcodec") == "none":
         raise DownloadFailed("В посте нет видео.")
 
@@ -268,7 +270,7 @@ def _download_ytdlp_video(url: str, workdir: Path, fmt: str, *, merge: bool = Fa
         )
     with YoutubeDL(opts) as ydl:
         info = ydl.extract_info(url, download=False)
-        _validate_info(info)
+        _validate_info(info, max_duration_seconds=max_duration_seconds)
         ydl.download([url])
     found = _find_file(workdir, {".mp4"})
     if not found:
@@ -499,7 +501,7 @@ def _try_og_media(url: str, workdir: Path, job_id: str) -> DownloadResult:
     return result
 
 
-def _download_with_fallbacks(url: str, job_id: str) -> DownloadResult:
+def _download_with_fallbacks(url: str, job_id: str, max_duration_seconds: int | None = None) -> DownloadResult:
     DOWNLOAD_DIR.mkdir(parents=True, exist_ok=True)
     workdir = DOWNLOAD_DIR / job_id
     if workdir.exists():
@@ -570,9 +572,9 @@ def _download_with_fallbacks(url: str, job_id: str) -> DownloadResult:
         shutil.rmtree(workdir, ignore_errors=True)
 
 
-async def download_media(url: str, job_id: str) -> DownloadResult:
+async def download_media(url: str, job_id: str, *, max_duration_seconds: int | None = None) -> DownloadResult:
     return await asyncio.wait_for(
-        asyncio.to_thread(_download_with_fallbacks, url, job_id),
+        asyncio.to_thread(_download_with_fallbacks, url, job_id, max_duration_seconds),
         timeout=settings.download_timeout_seconds,
     )
 
