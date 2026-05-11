@@ -280,8 +280,9 @@ def _download_ytdlp_video(url: str, workdir: Path, fmt: str, *, merge: bool = Fa
     opts.update(
         {
             "format": fmt,
-            "format_sort": ["+size", "+br", "+res", "+fps", "vcodec:h264", "acodec:aac"],
+            "format_sort": ["+res", "+br", "+size", "+fps", "vcodec:h264", "acodec:aac"],
             "max_filesize": settings.max_file_bytes,
+            "remote_components": ["ejs:github"],
             "writethumbnail": True,
             "convertthumbnails": "jpg",
             "embedsubs": False,
@@ -557,7 +558,7 @@ def _download_with_fallbacks(url: str, job_id: str, max_duration_seconds: int | 
         shutil.rmtree(workdir)
     workdir.mkdir(parents=True)
     formats = [
-        ("worst[ext=mp4][vcodec^=avc1][acodec^=mp4a]/best[ext=mp4][vcodec^=avc1][acodec^=mp4a][height<=480]/best[ext=mp4][vcodec^=avc1][acodec^=mp4a]", False),
+        ("bestvideo[ext=mp4][vcodec^=avc1][height<=720]+bestaudio[ext=m4a]/best[ext=mp4][vcodec^=avc1][acodec^=mp4a]", True),
         ("worst[ext=mp4][vcodec!=none][acodec!=none]/best[ext=mp4][vcodec!=none][acodec!=none][height<=480]/best[ext=mp4][vcodec!=none][acodec!=none]", False),
         ("worstvideo[ext=mp4][vcodec^=avc1][height<=480]+worstaudio[ext=m4a]/bestvideo[ext=mp4][vcodec^=avc1][height<=480]+bestaudio[ext=m4a]/bestvideo[ext=mp4][vcodec^=avc1]+bestaudio[ext=m4a]", True),
         ("best[ext=webm][vcodec^=vp9][height<=1080]/best[ext=webm][vcodec^=av1][height<=1080]/best[ext=webm]", True),
