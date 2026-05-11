@@ -40,7 +40,7 @@ class Settings:
     max_file_mb: int = _int("MAX_FILE_MB", 50)
     telegram_api_base_url: str = os.getenv("TELEGRAM_API_BASE_URL", "")
     telegram_api_file_url: str = os.getenv("TELEGRAM_API_FILE_URL", "")
-    max_duration_seconds: int = _int("MAX_DURATION_SECONDS", 600)
+    max_duration_seconds: int = _int("MAX_DURATION_SECONDS", 7200)
     download_timeout_seconds: int = _int("DOWNLOAD_TIMEOUT_SECONDS", 600)
     job_ttl_seconds: int = _int("JOB_TTL_SECONDS", 1800)
     chat_cooldown_seconds: int = _int("CHAT_COOLDOWN_SECONDS", 20)
