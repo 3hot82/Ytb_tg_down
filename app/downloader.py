@@ -395,6 +395,30 @@ def _media_type(path: Path) -> Literal["photo", "video", "document"]:
     return "document"
 
 
+def _clear_workdir(workdir: Path) -> None:
+    for child in workdir.rglob("*"):
+        if child.is_file():
+            child.unlink(missing_ok=True)
+
+
+def _try_gallery_dl(url: str, workdir: Path, job_id: str) -> DownloadResult:
+    _clear_workdir(workdir)
+    path, info = _download_gallery_dl(url, workdir)
+    final = _move_final(path, job_id)
+    result = DownloadResult(path=final, media_type=_media_type(final), caption=_caption_from_info(info), extractor="gallery-dl")
+    log.info("downloaded job %s via gallery-dl: type=%s path=%s", job_id, result.media_type, final)
+    return result
+
+
+def _try_og_media(url: str, workdir: Path, job_id: str) -> DownloadResult:
+    _clear_workdir(workdir)
+    path, info = _download_og_media(url, workdir)
+    final = _move_final(path, job_id)
+    result = DownloadResult(path=final, media_type=_media_type(final), caption=_caption_from_info(info), extractor="og-meta")
+    log.info("downloaded job %s via og-meta: type=%s path=%s", job_id, result.media_type, final)
+    return result
+
+
 def _download_with_fallbacks(url: str, job_id: str) -> DownloadResult:
     DOWNLOAD_DIR.mkdir(parents=True, exist_ok=True)
     workdir = DOWNLOAD_DIR / job_id
@@ -408,11 +432,18 @@ def _download_with_fallbacks(url: str, job_id: str) -> DownloadResult:
         ("worst[ext=mp4]/best[ext=mp4][height<=480]/best[ext=mp4]/best", False),
     ]
     last_error: Exception | None = None
+    platform = _host_platform(url)
+    prefer_gallery = platform == "instagram" and any(marker in url for marker in ("/p/", "/reel/", "/reels/"))
     try:
+        if prefer_gallery:
+            try:
+                return _try_gallery_dl(url, workdir, job_id)
+            except (DownloadFailed, DownloadRejected, subprocess.TimeoutExpired) as exc:
+                last_error = exc
+                log.info("gallery-dl first attempt failed for %s: %s", job_id, exc)
+
         for fmt, merge in formats:
-            for child in workdir.rglob("*"):
-                if child.is_file():
-                    child.unlink(missing_ok=True)
+            _clear_workdir(workdir)
             try:
                 path, info = _download_ytdlp_video(url, workdir, fmt, merge=merge)
                 if path.suffix.lower() != ".mp4":
@@ -420,29 +451,21 @@ def _download_with_fallbacks(url: str, job_id: str) -> DownloadResult:
                 if not _is_telegram_mp4(path):
                     log.warning("%s is not confirmed h264+aac; accepting as video fallback", path)
                 final = _move_final(path, job_id)
+                log.info("downloaded job %s via yt-dlp: type=video path=%s", job_id, final)
                 return DownloadResult(path=final, media_type="video", caption=_caption_from_info(info), extractor="yt-dlp")
             except (DownloadError, DownloadFailed, DownloadRejected) as exc:
                 last_error = exc
-                log.info("yt-dlp video failed for %s: %s", job_id, exc)
+                log.info("yt-dlp video attempt failed for %s: %s", job_id, exc)
 
-        for child in workdir.rglob("*"):
-            if child.is_file():
-                child.unlink(missing_ok=True)
-        try:
-            path, info = _download_gallery_dl(url, workdir)
-            final = _move_final(path, job_id)
-            return DownloadResult(path=final, media_type=_media_type(final), caption=_caption_from_info(info), extractor="gallery-dl")
-        except (DownloadFailed, DownloadRejected, subprocess.TimeoutExpired) as exc:
-            last_error = exc
-            log.info("gallery-dl fallback failed for %s: %s", job_id, exc)
+        if not prefer_gallery:
+            try:
+                return _try_gallery_dl(url, workdir, job_id)
+            except (DownloadFailed, DownloadRejected, subprocess.TimeoutExpired) as exc:
+                last_error = exc
+                log.info("gallery-dl fallback failed for %s: %s", job_id, exc)
 
-        for child in workdir.rglob("*"):
-            if child.is_file():
-                child.unlink(missing_ok=True)
         try:
-            path, info = _download_og_media(url, workdir)
-            final = _move_final(path, job_id)
-            return DownloadResult(path=final, media_type=_media_type(final), caption=_caption_from_info(info), extractor="og-meta")
+            return _try_og_media(url, workdir, job_id)
         except (DownloadFailed, DownloadRejected) as exc:
             last_error = exc
             log.info("og fallback failed for %s: %s", job_id, exc)
