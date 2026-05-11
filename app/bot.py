@@ -10,7 +10,6 @@ from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 
 from aiogram import Bot, Dispatcher, F, Router
 from aiogram.client.default import DefaultBotProperties
-import aiohttp
 from aiogram.client.session.aiohttp import AiohttpSession
 from aiogram.client.telegram import TelegramAPIServer
 from aiogram.enums import ParseMode
@@ -27,11 +26,10 @@ log = logging.getLogger(__name__)
 
 
 def _bot_session() -> AiohttpSession:
-    timeout = aiohttp.ClientTimeout(total=settings.telegram_request_timeout_seconds)
     if not settings.telegram_api_base_url:
-        return AiohttpSession(timeout=timeout)
+        return AiohttpSession(timeout=settings.telegram_request_timeout_seconds)
     return AiohttpSession(
-        timeout=timeout,
+        timeout=settings.telegram_request_timeout_seconds,
         api=TelegramAPIServer(
             base=settings.telegram_api_base_url,
             file=settings.telegram_api_file_url,
