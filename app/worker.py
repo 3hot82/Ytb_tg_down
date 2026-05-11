@@ -108,7 +108,7 @@ async def _try_send_cached(redis: Redis, bot: Bot, job: MediaJob) -> bool:
         if media_type == "photo":
             await bot.send_photo(job.chat_id, file_id, caption=caption or None, reply_to_message_id=job.message_id)
         elif media_type == "video":
-            await bot.send_video(job.chat_id, file_id, caption=caption or None, reply_to_message_id=job.message_id)
+            await bot.send_video(job.chat_id, file_id, caption=caption or None, reply_to_message_id=job.message_id, supports_streaming=True)
         else:
             await bot.send_document(job.chat_id, file_id, caption=caption or None, reply_to_message_id=job.message_id)
         log.info("job %s sent from telegram file_id cache url=%s type=%s", job.id, job.url, media_type)
@@ -243,7 +243,7 @@ async def process_job(redis: Redis, bot: Bot, job: MediaJob) -> None:
                             if media_type == "photo":
                                 await bot.send_photo(waiter["chat_id"], file_id, reply_to_message_id=waiter.get("message_id"))
                             elif media_type == "video":
-                                await bot.send_video(waiter["chat_id"], file_id, reply_to_message_id=waiter.get("message_id"))
+                                await bot.send_video(waiter["chat_id"], file_id, reply_to_message_id=waiter.get("message_id"), supports_streaming=True)
                             else:
                                 await bot.send_document(waiter["chat_id"], file_id, reply_to_message_id=waiter.get("message_id"))
                             log.info("sent cached to waiter chat=%s url=%s", waiter["chat_id"], job.url)
