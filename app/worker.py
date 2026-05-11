@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import subprocess
+from pathlib import Path
 
 from aiogram import Bot
 from aiogram.client.session.aiohttp import AiohttpSession
@@ -55,6 +57,37 @@ async def _send_error(bot: Bot, job: MediaJob, text: str) -> None:
     await _delete_message(bot, job.chat_id, msg.message_id)
 
 
+
+
+def _make_video_thumbnail(video_path: Path) -> Path | None:
+    thumb_path = video_path.with_suffix(".thumb.jpg")
+    for timestamp in ("00:00:03", "00:00:01", "00:00:00.5"):
+        proc = subprocess.run(
+            [
+                "ffmpeg",
+                "-y",
+                "-ss",
+                timestamp,
+                "-i",
+                str(video_path),
+                "-frames:v",
+                "1",
+                "-vf",
+                "scale='min(320,iw)':-2",
+                "-q:v",
+                "3",
+                str(thumb_path),
+            ],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            check=False,
+        )
+        if proc.returncode == 0 and thumb_path.exists() and thumb_path.stat().st_size > 0:
+            return thumb_path
+    thumb_path.unlink(missing_ok=True)
+    return None
+
+
 async def process_job(redis: Redis, bot: Bot, job: MediaJob) -> None:
     await redis.hset(ACTIVE_JOBS, job.id, str(job.chat_id))
     result = None
@@ -73,13 +106,19 @@ async def process_job(redis: Redis, bot: Bot, job: MediaJob) -> None:
                     reply_to_message_id=job.message_id,
                 )
             elif item.media_type == "video":
-                await bot.send_video(
-                    chat_id=job.chat_id,
-                    video=FSInputFile(item.path),
-                    caption=item.caption,
-                    reply_to_message_id=job.message_id,
-                    supports_streaming=True,
-                )
+                thumbnail = _make_video_thumbnail(item.path)
+                try:
+                    await bot.send_video(
+                        chat_id=job.chat_id,
+                        video=FSInputFile(item.path),
+                        thumbnail=FSInputFile(thumbnail) if thumbnail else None,
+                        caption=item.caption,
+                        reply_to_message_id=job.message_id,
+                        supports_streaming=True,
+                    )
+                finally:
+                    if thumbnail:
+                        thumbnail.unlink(missing_ok=True)
             else:
                 await bot.send_document(
                     chat_id=job.chat_id,
