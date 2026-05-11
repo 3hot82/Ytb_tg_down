@@ -108,7 +108,7 @@ async def _try_send_cached(redis: Redis, bot: Bot, job: MediaJob) -> bool:
         if media_type == "photo":
             await bot.send_photo(job.chat_id, file_id, caption=caption or None, reply_to_message_id=job.message_id)
         elif media_type == "video":
-            await bot.send_video(job.chat_id, file_id, caption=caption or None, reply_to_message_id=job.message_id, supports_streaming=True)
+            await bot.send_video(job.chat_id, file_id, caption=caption or None, reply_to_message_id=job.message_id)
         else:
             await bot.send_document(job.chat_id, file_id, caption=caption or None, reply_to_message_id=job.message_id)
         log.info("job %s sent from telegram file_id cache url=%s type=%s", job.id, job.url, media_type)
@@ -198,10 +198,8 @@ async def process_job(redis: Redis, bot: Bot, job: MediaJob) -> None:
                         chat_id=job.chat_id,
                         video=FSInputFile(item.path),
                         thumbnail=FSInputFile(thumbnail) if thumbnail else None,
-                        cover=FSInputFile(cover) if cover else None,
                         caption=item.caption,
                         reply_to_message_id=job.message_id,
-                        supports_streaming=True,
                     )
                     await _cache_sent_message(redis, job, "video", sent, item.caption, enabled=cache_enabled)
                 finally:
@@ -245,7 +243,7 @@ async def process_job(redis: Redis, bot: Bot, job: MediaJob) -> None:
                             if media_type == "photo":
                                 await bot.send_photo(waiter["chat_id"], file_id, reply_to_message_id=waiter.get("message_id"))
                             elif media_type == "video":
-                                await bot.send_video(waiter["chat_id"], file_id, reply_to_message_id=waiter.get("message_id"), supports_streaming=True)
+                                await bot.send_video(waiter["chat_id"], file_id, reply_to_message_id=waiter.get("message_id"))
                             else:
                                 await bot.send_document(waiter["chat_id"], file_id, reply_to_message_id=waiter.get("message_id"))
                             log.info("sent cached to waiter chat=%s url=%s", waiter["chat_id"], job.url)
