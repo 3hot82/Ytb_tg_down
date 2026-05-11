@@ -308,9 +308,11 @@ async def _temporary_reply(message: Message, text: str, *, delay: int = 5) -> No
 async def _setup_bot_commands(bot: Bot) -> None:
     public_commands = [
         BotCommand(command="start", description="Как пользоваться ботом"),
+        BotCommand(command="redownload", description="Заново скачать видео, обойти кэш"),
     ]
     admin_commands = [
         BotCommand(command="start", description="Как пользоваться ботом"),
+        BotCommand(command="redownload", description="Заново скачать видео, обойти кэш"),
         BotCommand(command="login", description="Открыть серверный браузер для логина"),
         BotCommand(command="stories", description="Скачать Instagram stories username"),
         BotCommand(command="cookies", description="Проверить статус cookies"),
