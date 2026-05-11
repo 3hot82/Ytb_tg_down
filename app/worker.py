@@ -7,6 +7,7 @@ import subprocess
 from pathlib import Path
 
 from aiogram import Bot
+import aiohttp
 from aiogram.client.session.aiohttp import AiohttpSession
 from aiogram.client.telegram import TelegramAPIServer
 from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError
@@ -21,10 +22,12 @@ from .redis_keys import ACTIVE_JOBS, JOB_PREFIX, MEDIA_CACHE_PREFIX, PAUSE_FLAG,
 log = logging.getLogger(__name__)
 
 
-def _bot_session() -> AiohttpSession | None:
+def _bot_session() -> AiohttpSession:
+    timeout = aiohttp.ClientTimeout(total=settings.telegram_request_timeout_seconds)
     if not settings.telegram_api_base_url:
-        return None
+        return AiohttpSession(timeout=timeout)
     return AiohttpSession(
+        timeout=timeout,
         api=TelegramAPIServer(
             base=settings.telegram_api_base_url,
             file=settings.telegram_api_file_url,
