@@ -9,9 +9,6 @@ Self-hosted Telegram-бот для скачивания медиа по ссыл
 - ✅ YouTube / youtu.be
 - ✅ TikTok
 - ✅ Instagram posts / reels / stories
-- ✅ VK / VK Video
-- ✅ Telegram Bot API cloud mode
-- ✅ Local Telegram Bot API server для файлов больше cloud-лимита
 
 ## Возможности
 
