@@ -19,7 +19,7 @@ from redis.asyncio import Redis
 
 from .config import settings
 from .models import MediaJob
-from .redis_keys import JOB_PREFIX, MEDIA_CACHE_PREFIX, PAUSE_FLAG, PENDING_JOBS_CHAT_PREFIX, PENDING_JOBS_USER_PREFIX
+from .redis_keys import JOB_PREFIX, MEDIA_CACHE_PREFIX, PAUSE_FLAG, PENDING_JOBS_CHAT_PREFIX, PENDING_JOBS_USER_PREFIX, URL_INFLIGHT_PREFIX
 
 log = logging.getLogger(__name__)
 
@@ -221,6 +221,23 @@ async def _queue_urls(message: Message, urls: list[str], *, force_download: bool
                 queue_urls.append(url)
     if not queue_urls:
         return
+
+    # Dedup URLs already in-flight (queued or being downloaded).
+    # force_download bypasses the check and sets fresh inflight lock.
+    filtered_urls: list[str] = []
+    inflight_ttl = max(settings.job_ttl_seconds, settings.pending_job_ttl_seconds)
+    for url in queue_urls:
+        if force_download:
+            await redis.delete(f"{URL_INFLIGHT_PREFIX}{url}")
+        else:
+            locked = await redis.set(f"{URL_INFLIGHT_PREFIX}{url}", "1", nx=True, ex=inflight_ttl)
+            if not locked:
+                log.debug("url already in-flight, skipping: %s", url)
+                continue
+        filtered_urls.append(url)
+    if not filtered_urls:
+        return
+    queue_urls = filtered_urls
 
     chat_id = message.chat.id
     user_id = message.from_user.id if message.from_user else None

@@ -15,7 +15,7 @@ from redis.asyncio import Redis
 from .config import settings
 from .downloader import DownloadRejected, cleanup_file, describe_media, download_media
 from .models import MediaJob
-from .redis_keys import ACTIVE_JOBS, JOB_PREFIX, MEDIA_CACHE_PREFIX, PAUSE_FLAG, PENDING_JOBS_CHAT_PREFIX, PENDING_JOBS_USER_PREFIX
+from .redis_keys import ACTIVE_JOBS, JOB_PREFIX, MEDIA_CACHE_PREFIX, PAUSE_FLAG, PENDING_JOBS_CHAT_PREFIX, PENDING_JOBS_USER_PREFIX, URL_INFLIGHT_PREFIX
 
 log = logging.getLogger(__name__)
 
@@ -228,6 +228,7 @@ async def process_job(redis: Redis, bot: Bot, job: MediaJob) -> None:
                 if item.cover_path:
                     cleanup_file(item.cover_path)
         await redis.hdel(ACTIVE_JOBS, job.id)
+        await redis.delete(f"{URL_INFLIGHT_PREFIX}{job.url}")
         await _release_pending(redis, job)
         await _release(redis, job)
 
