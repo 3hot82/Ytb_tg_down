@@ -558,7 +558,7 @@ def _download_with_fallbacks(url: str, job_id: str, max_duration_seconds: int | 
         shutil.rmtree(workdir)
     workdir.mkdir(parents=True)
     formats = [
-        ("best[ext=mp4][vcodec^=avc1][acodec^=mp4a][height<=720]/best[ext=mp4][vcodec^=avc1][acodec^=mp4a]", False),
+        ("best[ext=mp4][vcodec^=avc1][acodec^=mp4a][height<=480]/best[ext=mp4][vcodec^=avc1][acodec^=mp4a][height<=720]/best[ext=mp4][vcodec^=avc1][acodec^=mp4a]", False),
         ("worst[ext=mp4][vcodec!=none][acodec!=none]/best[ext=mp4][vcodec!=none][acodec!=none][height<=480]/best[ext=mp4][vcodec!=none][acodec!=none]", False),
         ("worstvideo[ext=mp4][vcodec^=avc1][height<=480]+worstaudio[ext=m4a]/bestvideo[ext=mp4][vcodec^=avc1][height<=480]+bestaudio[ext=m4a]/bestvideo[ext=mp4][vcodec^=avc1]+bestaudio[ext=m4a]", True),
         ("best[ext=webm][vcodec^=vp9][height<=1080]/best[ext=webm][vcodec^=av1][height<=1080]/best[ext=webm]", True),
