@@ -19,7 +19,7 @@ from redis.asyncio import Redis
 
 from .config import settings
 from .models import MediaJob
-from .redis_keys import CHAT_COOLDOWN_PREFIX, CHAT_LOCK_PREFIX, JOB_PREFIX, PAUSE_FLAG
+from .redis_keys import JOB_PREFIX, MEDIA_CACHE_PREFIX, PAUSE_FLAG, PENDING_JOBS_CHAT_PREFIX, PENDING_JOBS_USER_PREFIX
 
 log = logging.getLogger(__name__)
 
@@ -110,18 +110,154 @@ def _is_instagram_profile_url(url: str) -> bool:
     return _instagram_profile_username(url) is not None
 
 
-def _extract_supported_url(text: str | None) -> str | None:
+def _extract_supported_urls(text: str | None) -> list[str]:
     if not text:
-        return None
+        return []
+    urls: list[str] = []
+    seen: set[str] = set()
     for match in URL_RE.finditer(text):
-        url = match.group(0).rstrip(".,;!?)\"]}")
-        host = urlparse(url).netloc.lower().split(":", 1)[0]
-        if SUPPORTED_HOST_RE.search(host):
-            if _is_instagram_profile_url(url):
-                return None
-            return url
-    return None
+        raw_url = match.group(0).rstrip(".,;!?)\"]}")
+        host = urlparse(raw_url).netloc.lower().split(":", 1)[0]
+        if not SUPPORTED_HOST_RE.search(host):
+            continue
+        if _is_instagram_profile_url(raw_url):
+            continue
+        url = _canonical_url(raw_url)
+        if url in seen:
+            continue
+        seen.add(url)
+        urls.append(url)
+    return urls
 
+def _extract_supported_url(text: str | None) -> str | None:
+    urls = _extract_supported_urls(text)
+    return urls[0] if urls else None
+
+async def _try_send_cached(message: Message, url: str) -> bool:
+    assert redis is not None
+    raw = await redis.get(f"{MEDIA_CACHE_PREFIX}{url}")
+    if not raw:
+        return False
+    media_type, file_id, caption = (raw.split("\t", 2) + [None, None, None])[:3]
+    if media_type not in {"photo", "video", "document"} or not file_id:
+        await redis.delete(f"{MEDIA_CACHE_PREFIX}{url}")
+        return False
+    try:
+        if media_type == "photo":
+            await message.answer_photo(file_id, caption=caption or None, reply_to_message_id=message.message_id)
+        elif media_type == "video":
+            await message.answer_video(file_id, caption=caption or None, reply_to_message_id=message.message_id, supports_streaming=True)
+        else:
+            await message.answer_document(file_id, caption=caption or None, reply_to_message_id=message.message_id)
+        log.info("sent from telegram file_id cache chat=%s url=%s type=%s", message.chat.id, url, media_type)
+        return True
+    except TelegramBadRequest as exc:
+        await redis.delete(f"{MEDIA_CACHE_PREFIX}{url}")
+        log.warning("telegram file_id cache failed for %s, invalidating and queueing: %s", url, exc)
+        return False
+
+def _pending_chat_key(chat_id: int) -> str:
+    return f"{PENDING_JOBS_CHAT_PREFIX}{chat_id}"
+
+def _pending_user_key(user_id: int) -> str:
+    return f"{PENDING_JOBS_USER_PREFIX}{user_id}"
+
+async def _reserve_pending(jobs: list[MediaJob]) -> bool:
+    assert redis is not None
+    if not jobs:
+        return True
+    chat_id = jobs[0].chat_id
+    user_id = jobs[0].user_id
+    chat_key = _pending_chat_key(chat_id)
+    user_key = _pending_user_key(user_id) if user_id is not None else None
+    chat_pending = await redis.scard(chat_key)
+    if chat_pending + len(jobs) > settings.max_pending_jobs_per_chat:
+        return False
+    if user_key:
+        user_pending = await redis.scard(user_key)
+        if user_pending + len(jobs) > settings.max_pending_jobs_per_user:
+            return False
+    job_ids = [job.id for job in jobs]
+    ttl = settings.pending_job_ttl_seconds
+    pipe = redis.pipeline()
+    pipe.sadd(chat_key, *job_ids)
+    pipe.expire(chat_key, ttl)
+    if user_key:
+        pipe.sadd(user_key, *job_ids)
+        pipe.expire(user_key, ttl)
+    await pipe.execute()
+    return True
+
+async def _release_pending(jobs: list[MediaJob]) -> None:
+    assert redis is not None
+    if not jobs:
+        return
+    pipe = redis.pipeline()
+    for job in jobs:
+        pipe.srem(_pending_chat_key(job.chat_id), job.id)
+        if job.user_id is not None:
+            pipe.srem(_pending_user_key(job.user_id), job.id)
+    await pipe.execute()
+
+async def _queue_urls(message: Message, urls: list[str], *, force_download: bool = False) -> None:
+    assert redis is not None
+    if await redis.get(PAUSE_FLAG):
+        await _temporary_reply(message, "Обновляю загрузчик, новые задачи временно на паузе. Попробуйте чуть позже.")
+        return
+
+    urls = list(dict.fromkeys(_canonical_url(url) for url in urls))
+    if not urls:
+        return
+    if len(urls) > settings.max_urls_per_message:
+        await _temporary_reply(message, f"Слишком много ссылок в одном сообщении: максимум {settings.max_urls_per_message}.")
+        return
+
+    queue_urls: list[str] = []
+    if force_download:
+        queue_urls = urls
+    else:
+        for url in urls:
+            if not await _try_send_cached(message, url):
+                queue_urls.append(url)
+    if not queue_urls:
+        return
+
+    chat_id = message.chat.id
+    user_id = message.from_user.id if message.from_user else None
+    jobs = [
+        MediaJob.create(
+            chat_id=chat_id,
+            user_id=user_id,
+            message_id=message.message_id,
+            url=url,
+            status_message_id=None,
+            force_download=force_download,
+        )
+        for url in queue_urls
+    ]
+    if not await _reserve_pending(jobs):
+        await _temporary_reply(
+            message,
+            "Очередь заполнена. Лимиты: "
+            f"{settings.max_pending_jobs_per_chat} задач на чат и "
+            f"{settings.max_pending_jobs_per_user} задач на пользователя.",
+        )
+        return
+
+    try:
+        pipe = redis.pipeline()
+        for job in jobs:
+            pipe.set(f"{JOB_PREFIX}{job.id}", job.dumps(), ex=settings.job_ttl_seconds)
+            pipe.rpush(settings.queue_name, job.dumps())
+        await pipe.execute()
+    except Exception:
+        await _release_pending(jobs)
+        raise
+    for job in jobs:
+        log.info("queued job %s chat=%s user=%s url=%s", job.id, chat_id, user_id, job.url)
+
+async def _queue_url(message: Message, url: str, *, force_download: bool = False) -> None:
+    await _queue_urls(message, [url], force_download=force_download)
 
 def _is_admin(message: Message) -> bool:
     return bool(message.from_user and message.from_user.id in settings.admin_ids)
@@ -264,35 +400,7 @@ async def _export_cookies(platform: str = "instagram") -> tuple[bool, str]:
 
 
 
-async def _queue_url(message: Message, url: str, *, force_download: bool = False) -> None:
-    assert redis is not None
-    if await redis.get(PAUSE_FLAG):
-        await _temporary_reply(message, "Обновляю загрузчик, новые задачи временно на паузе. Попробуйте чуть позже.")
-        return
 
-    url = _canonical_url(url)
-    chat_id = message.chat.id
-    cooldown_key = f"{CHAT_COOLDOWN_PREFIX}{chat_id}"
-    if not await redis.set(cooldown_key, "1", nx=True, ex=settings.chat_cooldown_seconds):
-        await _temporary_reply(message, f"Слишком часто 🙂 Подождите {settings.chat_cooldown_seconds} сек.")
-        return
-
-    lock_key = f"{CHAT_LOCK_PREFIX}{chat_id}"
-    job = MediaJob.create(
-        chat_id=chat_id,
-        user_id=message.from_user.id if message.from_user else None,
-        message_id=message.message_id,
-        url=url,
-        status_message_id=None,
-        force_download=force_download,
-    )
-    if not await redis.set(lock_key, job.id, nx=True, ex=settings.active_job_idle_timeout_seconds):
-        await _temporary_reply(message, "В этом чате уже есть активная загрузка. Дождитесь завершения.")
-        return
-
-    await redis.set(f"{JOB_PREFIX}{job.id}", job.dumps(), ex=settings.job_ttl_seconds)
-    await redis.rpush(settings.queue_name, job.dumps())
-    log.info("queued job %s chat=%s url=%s", job.id, chat_id, url)
 
 
 @router.message(CommandStart())
@@ -454,10 +562,10 @@ async def instagram_stories(message: Message) -> None:
 
 @router.message(F.text | F.caption)
 async def catch_media_link(message: Message) -> None:
-    url = _extract_supported_url(message.text or message.caption)
-    if not url:
+    urls = _extract_supported_urls(message.text or message.caption)
+    if not urls:
         return
-    await _queue_url(message, url)
+    await _queue_urls(message, urls)
 
 
 async def main() -> None:

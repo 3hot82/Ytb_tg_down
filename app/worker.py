@@ -15,7 +15,7 @@ from redis.asyncio import Redis
 from .config import settings
 from .downloader import DownloadRejected, cleanup_file, describe_media, download_media
 from .models import MediaJob
-from .redis_keys import ACTIVE_JOBS, CHAT_LOCK_PREFIX, JOB_PREFIX, MEDIA_CACHE_PREFIX, PAUSE_FLAG
+from .redis_keys import ACTIVE_JOBS, JOB_PREFIX, MEDIA_CACHE_PREFIX, PAUSE_FLAG, PENDING_JOBS_CHAT_PREFIX, PENDING_JOBS_USER_PREFIX
 
 log = logging.getLogger(__name__)
 
@@ -35,10 +35,7 @@ def _bot_session() -> AiohttpSession | None:
 
 
 async def _release(redis: Redis, job: MediaJob) -> None:
-    lock_key = f"{CHAT_LOCK_PREFIX}{job.chat_id}"
-    current = await redis.get(lock_key)
-    if current == job.id:
-        await redis.delete(lock_key)
+    # Bot no longer uses CHAT_LOCK; only cleanup JOB_PREFIX.
     await redis.delete(f"{JOB_PREFIX}{job.id}")
 
 
@@ -154,8 +151,20 @@ async def _cache_sent_message(
     log.info("cached telegram file_id for url=%s type=%s ttl=%s", job.url, media_type, settings.media_cache_ttl_seconds)
 
 
+
+
+async def _release_pending(redis: Redis, job: MediaJob) -> None:
+    chat_key = f"{PENDING_JOBS_CHAT_PREFIX}{job.chat_id}"
+    pipe = redis.pipeline()
+    pipe.srem(chat_key, job.id)
+    if job.user_id is not None:
+        pipe.srem(f"{PENDING_JOBS_USER_PREFIX}{job.user_id}", job.id)
+    await pipe.execute()
+
+
 async def process_job(redis: Redis, bot: Bot, job: MediaJob) -> None:
     await redis.hset(ACTIVE_JOBS, job.id, str(job.chat_id))
+    await redis.expire(ACTIVE_JOBS, settings.job_ttl_seconds)
     result = None
     try:
         if await _try_send_cached(redis, bot, job):
@@ -219,6 +228,7 @@ async def process_job(redis: Redis, bot: Bot, job: MediaJob) -> None:
                 if item.cover_path:
                     cleanup_file(item.cover_path)
         await redis.hdel(ACTIVE_JOBS, job.id)
+        await _release_pending(redis, job)
         await _release(redis, job)
 
 
