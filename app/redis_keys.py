@@ -1,0 +1,6 @@
+PAUSE_FLAG = "ytbot:pause"
+ACTIVE_JOBS = "ytbot:active_jobs"
+YTDLP_UPDATED_VERSION = "ytbot:ytdlp_updated_version"
+CHAT_LOCK_PREFIX = "ytbot:chat_lock:"
+CHAT_COOLDOWN_PREFIX = "ytbot:cooldown:"
+JOB_PREFIX = "ytbot:job:"

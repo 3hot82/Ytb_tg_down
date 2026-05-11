@@ -1,0 +1,42 @@
+# Runtime secrets / local configuration
+.env
+.env.*
+!.env.example
+.auth-proxy.env
+*.secret
+*.key
+*.pem
+
+# Downloaded media and runtime data
+downloads/
+data/
+cookies/
+browser-profile/
+redis-data/
+.redis-data/
+*.sqlite
+*.sqlite3
+*.db
+*.session
+*.log
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+.venv/
+venv/
+
+# Docker / local compose overrides
+docker-compose.override.yml
+
+# OS / editor
+.DS_Store
+.idea/
+.vscode/
+*.swp
