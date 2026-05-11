@@ -11,7 +11,7 @@ from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
 from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError
 from aiogram.filters import Command, CommandStart
-from aiogram.types import Message
+from aiogram.types import BotCommand, BotCommandScopeChat, BotCommandScopeDefault, Message
 from redis.asyncio import Redis
 
 from .config import settings
@@ -55,6 +55,21 @@ async def _delete_later(message: Message, delay: int = 5) -> None:
 async def _temporary_reply(message: Message, text: str, *, delay: int = 5) -> None:
     reply = await message.reply(text)
     asyncio.create_task(_delete_later(reply, delay=delay))
+
+
+async def _setup_bot_commands(bot: Bot) -> None:
+    public_commands = [
+        BotCommand(command="start", description="Как пользоваться ботом"),
+    ]
+    admin_commands = [
+        BotCommand(command="start", description="Как пользоваться ботом"),
+        BotCommand(command="login", description="Открыть серверный браузер для логина"),
+        BotCommand(command="cookies", description="Проверить статус cookies"),
+        BotCommand(command="cookies_export", description="Экспортировать Instagram cookies"),
+    ]
+    await bot.set_my_commands(public_commands, scope=BotCommandScopeDefault())
+    for admin_id in settings.admin_ids:
+        await bot.set_my_commands(admin_commands, scope=BotCommandScopeChat(chat_id=admin_id))
 
 
 async def _export_cookies(platform: str = "instagram") -> tuple[bool, str]:
@@ -181,6 +196,7 @@ async def main() -> None:
     bot = Bot(settings.bot_token, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
     dp = Dispatcher()
     dp.include_router(router)
+    await _setup_bot_commands(bot)
     try:
         await dp.start_polling(bot)
     finally:
