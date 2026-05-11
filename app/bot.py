@@ -5,7 +5,7 @@ import logging
 from io import BytesIO
 import re
 from pathlib import Path
-from urllib.parse import urlparse
+from urllib.parse import urlparse, urlunparse
 
 from aiogram import Bot, Dispatcher, F, Router
 from aiogram.client.default import DefaultBotProperties
@@ -33,6 +33,26 @@ router = Router()
 redis: Redis | None = None
 
 
+
+
+def _instagram_profile_to_stories_url(url: str) -> str | None:
+    parsed = urlparse(url)
+    host = parsed.netloc.lower().split(":", 1)[0]
+    if host not in {"instagram.com", "www.instagram.com", "m.instagram.com"}:
+        return None
+    parts = [part for part in parsed.path.split("/") if part]
+    if len(parts) != 1:
+        return None
+    username = parts[0].lstrip("@")
+    reserved = {"p", "reel", "reels", "stories", "explore", "accounts", "direct", "tv"}
+    if username.lower() in reserved or not INSTAGRAM_USERNAME_RE.fullmatch(username):
+        return None
+    return urlunparse(("https", "www.instagram.com", f"/stories/{username}/", "", "", ""))
+
+
+def _normalize_supported_url(url: str) -> str:
+    return _instagram_profile_to_stories_url(url) or url
+
 def _extract_supported_url(text: str | None) -> str | None:
     if not text:
         return None
@@ -40,7 +60,7 @@ def _extract_supported_url(text: str | None) -> str | None:
         url = match.group(0).rstrip(".,;!?)\"]}")
         host = urlparse(url).netloc.lower().split(":", 1)[0]
         if SUPPORTED_HOST_RE.search(host):
-            return url
+            return _normalize_supported_url(url)
     return None
 
 
