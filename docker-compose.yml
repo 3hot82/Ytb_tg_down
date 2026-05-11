@@ -42,7 +42,7 @@ services:
     command: ["python", "-m", "app.watcher"]
 
   auth-browser:
-    image: lscr.io/linuxserver/chromium:latest
+    image: lscr.io/linuxserver/chromium:${AUTH_BROWSER_IMAGE_TAG:-kasm}
     restart: unless-stopped
     profiles:
       - auth
