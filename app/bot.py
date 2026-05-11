@@ -5,7 +5,7 @@ import logging
 from io import BytesIO
 import re
 from pathlib import Path
-from urllib.parse import urlparse, urlunparse
+from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 
 from aiogram import Bot, Dispatcher, F, Router
 from aiogram.client.default import DefaultBotProperties
@@ -34,6 +34,31 @@ def _bot_session() -> AiohttpSession | None:
             is_local=True,
         )
     )
+
+
+
+_TRACKING_QUERY_PREFIXES = ("utm_",)
+_TRACKING_QUERY_KEYS = {"fbclid", "gclid", "igsh", "si", "feature", "pp", "share", "app", "source"}
+
+
+def _canonical_url(url: str) -> str:
+    parsed = urlparse(url.strip())
+    scheme = parsed.scheme.lower() or "https"
+    host = parsed.netloc.lower().split(":", 1)[0]
+    path = parsed.path.rstrip("/") or "/"
+    query_items = []
+    for key, value in parse_qsl(parsed.query, keep_blank_values=True):
+        key_lower = key.lower()
+        if key_lower in _TRACKING_QUERY_KEYS or any(key_lower.startswith(prefix) for prefix in _TRACKING_QUERY_PREFIXES):
+            continue
+        query_items.append((key, value))
+    query = urlencode(sorted(query_items))
+    return urlunparse((scheme, host, path, "", query, ""))
+
+
+def _force_download_arg(text: str | None) -> str | None:
+    args = (text or "").split(maxsplit=1)
+    return args[1] if len(args) > 1 else None
 
 
 URL_RE = re.compile(r"https?://[^\s<>()]+", re.IGNORECASE)
@@ -239,12 +264,13 @@ async def _export_cookies(platform: str = "instagram") -> tuple[bool, str]:
 
 
 
-async def _queue_url(message: Message, url: str) -> None:
+async def _queue_url(message: Message, url: str, *, force_download: bool = False) -> None:
     assert redis is not None
     if await redis.get(PAUSE_FLAG):
         await _temporary_reply(message, "Обновляю загрузчик, новые задачи временно на паузе. Попробуйте чуть позже.")
         return
 
+    url = _canonical_url(url)
     chat_id = message.chat.id
     cooldown_key = f"{CHAT_COOLDOWN_PREFIX}{chat_id}"
     if not await redis.set(cooldown_key, "1", nx=True, ex=settings.chat_cooldown_seconds):
@@ -258,6 +284,7 @@ async def _queue_url(message: Message, url: str) -> None:
         message_id=message.message_id,
         url=url,
         status_message_id=None,
+        force_download=force_download,
     )
     if not await redis.set(lock_key, job.id, nx=True, ex=settings.active_job_idle_timeout_seconds):
         await _temporary_reply(message, "В этом чате уже есть активная загрузка. Дождитесь завершения.")
@@ -400,6 +427,16 @@ async def cookies_export(message: Message) -> None:
     ok, details = await _export_cookies("instagram")
     text = "✅ Cookies экспортированы" if ok else "❌ Не удалось экспортировать cookies"
     await status.edit_text(f"{text}\n{details}")
+
+
+@router.message(Command("redownload"))
+async def redownload(message: Message) -> None:
+    raw = _force_download_arg(message.text or message.caption)
+    url = _extract_supported_url(raw) if raw else None
+    if not url:
+        await message.answer("Напишите ссылку после команды, например:\n/redownload https://youtu.be/...")
+        return
+    await _queue_url(message, url, force_download=True)
 
 
 @router.message(Command("stories"))

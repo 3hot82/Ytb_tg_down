@@ -9,13 +9,13 @@ from aiogram import Bot
 from aiogram.client.session.aiohttp import AiohttpSession
 from aiogram.client.telegram import TelegramAPIServer
 from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError
-from aiogram.types import FSInputFile
+from aiogram.types import FSInputFile, Message
 from redis.asyncio import Redis
 
 from .config import settings
 from .downloader import DownloadRejected, cleanup_file, describe_media, download_media
 from .models import MediaJob
-from .redis_keys import ACTIVE_JOBS, CHAT_LOCK_PREFIX, JOB_PREFIX, PAUSE_FLAG
+from .redis_keys import ACTIVE_JOBS, CHAT_LOCK_PREFIX, JOB_PREFIX, MEDIA_CACHE_PREFIX, PAUSE_FLAG
 
 log = logging.getLogger(__name__)
 
@@ -88,29 +88,96 @@ def _make_video_thumbnail(video_path: Path) -> Path | None:
     return None
 
 
+
+
+async def _try_send_cached(redis: Redis, bot: Bot, job: MediaJob) -> bool:
+    if job.force_download:
+        await redis.delete(f"{MEDIA_CACHE_PREFIX}{job.url}")
+        log.info("job %s bypassed and cleared telegram file_id cache url=%s", job.id, job.url)
+        return False
+    raw = await redis.get(f"{MEDIA_CACHE_PREFIX}{job.url}")
+    if not raw:
+        return False
+    media_type, file_id, caption = (raw.split("\t", 2) + [None, None, None])[:3]
+    if media_type not in {"photo", "video", "document"}:
+        await redis.delete(f"{MEDIA_CACHE_PREFIX}{job.url}")
+        return False
+    if not file_id:
+        await redis.delete(f"{MEDIA_CACHE_PREFIX}{job.url}")
+        return False
+    try:
+        if media_type == "photo":
+            await bot.send_photo(job.chat_id, file_id, caption=caption or None, reply_to_message_id=job.message_id)
+        elif media_type == "video":
+            await bot.send_video(job.chat_id, file_id, caption=caption or None, reply_to_message_id=job.message_id, supports_streaming=True)
+        else:
+            await bot.send_document(job.chat_id, file_id, caption=caption or None, reply_to_message_id=job.message_id)
+        log.info("job %s sent from telegram file_id cache url=%s type=%s", job.id, job.url, media_type)
+        return True
+    except TelegramBadRequest as exc:
+        await redis.delete(f"{MEDIA_CACHE_PREFIX}{job.url}")
+        log.warning("telegram file_id cache failed for %s, invalidating: %s", job.url, exc)
+        return False
+
+
+def _message_file_id(message: Message, media_type: str) -> str | None:
+    if media_type == "photo" and message.photo:
+        return message.photo[-1].file_id
+    if media_type == "video" and message.video:
+        return message.video.file_id
+    if message.document:
+        return message.document.file_id
+    return None
+
+
+async def _cache_sent_message(
+    redis: Redis,
+    job: MediaJob,
+    media_type: str,
+    message: Message,
+    caption: str | None,
+    *,
+    enabled: bool,
+) -> None:
+    if not enabled:
+        return
+    file_id = _message_file_id(message, media_type)
+    if not file_id:
+        log.warning("job %s sent but no file_id returned for cache", job.id)
+        return
+    safe_caption = (caption or "").replace("\t", " ").replace("\n", " ")
+    await redis.set(f"{MEDIA_CACHE_PREFIX}{job.url}", f"{media_type}\t{file_id}\t{safe_caption}")
+    log.info("cached telegram file_id for url=%s type=%s", job.url, media_type)
+
+
 async def process_job(redis: Redis, bot: Bot, job: MediaJob) -> None:
     await redis.hset(ACTIVE_JOBS, job.id, str(job.chat_id))
     result = None
     try:
+        if await _try_send_cached(redis, bot, job):
+            return
         result = await download_media(job.url, job.id)
         media_info = describe_media(result.path)
-        log.info("job %s downloaded: url=%s type=%s caption=%r %s", job.id, job.url, result.media_type, result.caption, media_info)
-        for item in result.all_items():
+        items = result.all_items()
+        cache_enabled = len(items) == 1
+        log.info("job %s downloaded: url=%s type=%s caption=%r items=%s cache=%s %s", job.id, job.url, result.media_type, result.caption, len(items), cache_enabled, media_info)
+        for item in items:
             if item.path.stat().st_size > settings.max_file_bytes:
                 raise DownloadRejected(f"Файл больше {settings.max_file_mb} MB.")
             if item.media_type == "photo":
-                await bot.send_photo(
+                sent = await bot.send_photo(
                     chat_id=job.chat_id,
                     photo=FSInputFile(item.path),
                     caption=item.caption,
                     reply_to_message_id=job.message_id,
                 )
+                await _cache_sent_message(redis, job, "photo", sent, item.caption, enabled=cache_enabled)
             elif item.media_type == "video":
                 generated_thumbnail = _make_video_thumbnail(item.path)
                 thumbnail = item.thumbnail_path or generated_thumbnail
                 cover = item.cover_path
                 try:
-                    await bot.send_video(
+                    sent = await bot.send_video(
                         chat_id=job.chat_id,
                         video=FSInputFile(item.path),
                         thumbnail=FSInputFile(thumbnail) if thumbnail else None,
@@ -119,16 +186,18 @@ async def process_job(redis: Redis, bot: Bot, job: MediaJob) -> None:
                         reply_to_message_id=job.message_id,
                         supports_streaming=True,
                     )
+                    await _cache_sent_message(redis, job, "video", sent, item.caption, enabled=cache_enabled)
                 finally:
                     if generated_thumbnail:
                         generated_thumbnail.unlink(missing_ok=True)
             else:
-                await bot.send_document(
+                sent = await bot.send_document(
                     chat_id=job.chat_id,
                     document=FSInputFile(item.path),
                     caption=item.caption,
                     reply_to_message_id=job.message_id,
                 )
+                await _cache_sent_message(redis, job, "document", sent, item.caption, enabled=cache_enabled)
     except DownloadRejected as exc:
         await _send_error(bot, job, f"Не могу скачать: {exc}")
     except asyncio.TimeoutError:
