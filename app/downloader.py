@@ -39,11 +39,22 @@ class DownloadFailed(Exception):
 
 
 @dataclass(frozen=True)
+class DownloadItem:
+    path: Path
+    media_type: Literal["photo", "video", "document"]
+    caption: str | None = None
+
+
+@dataclass(frozen=True)
 class DownloadResult:
     path: Path
     media_type: Literal["photo", "video", "document"]
     caption: str | None
     extractor: str = "unknown"
+    items: tuple[DownloadItem, ...] = ()
+
+    def all_items(self) -> tuple[DownloadItem, ...]:
+        return self.items or (DownloadItem(self.path, self.media_type, self.caption),)
 
 
 def _base_opts(workdir: Path) -> dict[str, Any]:
@@ -141,7 +152,19 @@ def _find_file(workdir: Path, suffixes: set[str], *, largest: bool = False) -> P
 
 def _find_gallery_media(workdir: Path) -> Path | None:
     # Prefer actual video over thumbnails, then largest image.
-    return _find_file(workdir, {".mp4", ".m4v", ".mov"}, largest=True) or _find_file(workdir, IMAGE_EXTS, largest=True)
+    files = _find_gallery_media_files(workdir)
+    return files[0] if files else None
+
+
+def _find_gallery_media_files(workdir: Path) -> list[Path]:
+    files = [
+        p
+        for p in workdir.rglob("*")
+        if p.is_file() and p.suffix.lower() in MEDIA_EXTS and _filesize_ok(p)
+    ]
+    # Keep gallery/story order when possible. Fall back to path name for stable output.
+    files.sort(key=lambda p: str(p.relative_to(workdir)))
+    return files
 
 
 def _run_ffprobe(path: Path) -> dict[str, Any]:
@@ -386,6 +409,15 @@ def _move_final(path: Path, job_id: str) -> Path:
     return final
 
 
+def _move_gallery_finals(paths: list[Path], job_id: str) -> list[Path]:
+    finals: list[Path] = []
+    for index, path in enumerate(paths, start=1):
+        final = DOWNLOAD_DIR / f"{job_id}-{index:02d}{path.suffix.lower()}"
+        shutil.move(str(path), final)
+        finals.append(final)
+    return finals
+
+
 def _media_type(path: Path) -> Literal["photo", "video", "document"]:
     suffix = path.suffix.lower()
     if suffix in IMAGE_EXTS:
@@ -403,10 +435,25 @@ def _clear_workdir(workdir: Path) -> None:
 
 def _try_gallery_dl(url: str, workdir: Path, job_id: str) -> DownloadResult:
     _clear_workdir(workdir)
-    path, info = _download_gallery_dl(url, workdir)
-    final = _move_final(path, job_id)
-    result = DownloadResult(path=final, media_type=_media_type(final), caption=_caption_from_info(info), extractor="gallery-dl")
-    log.info("downloaded job %s via gallery-dl: type=%s path=%s", job_id, result.media_type, final)
+    _, info = _download_gallery_dl(url, workdir)
+    media_files = _find_gallery_media_files(workdir)
+    if not media_files:
+        raise DownloadFailed("gallery-dl не создал медиа-файл.")
+    finals = _move_gallery_finals(media_files, job_id)
+    caption = _caption_from_info(info)
+    items = tuple(
+        DownloadItem(path=final, media_type=_media_type(final), caption=caption if index == 0 else None)
+        for index, final in enumerate(finals)
+    )
+    first = items[0]
+    result = DownloadResult(
+        path=first.path,
+        media_type=first.media_type,
+        caption=first.caption,
+        extractor="gallery-dl",
+        items=items,
+    )
+    log.info("downloaded job %s via gallery-dl: files=%s first_type=%s", job_id, len(items), result.media_type)
     return result
 
 

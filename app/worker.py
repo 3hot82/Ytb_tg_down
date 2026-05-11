@@ -46,30 +46,31 @@ async def process_job(redis: Redis, bot: Bot, job: MediaJob) -> None:
         result = await download_media(job.url, job.id)
         media_info = describe_media(result.path)
         log.info("job %s downloaded: url=%s type=%s caption=%r %s", job.id, job.url, result.media_type, result.caption, media_info)
-        if result.path.stat().st_size > settings.max_file_bytes:
-            raise DownloadRejected(f"Файл больше {settings.max_file_mb} MB.")
-        if result.media_type == "photo":
-            await bot.send_photo(
-                chat_id=job.chat_id,
-                photo=FSInputFile(result.path),
-                caption=result.caption,
-                reply_to_message_id=job.message_id,
-            )
-        elif result.media_type == "video":
-            await bot.send_video(
-                chat_id=job.chat_id,
-                video=FSInputFile(result.path),
-                caption=result.caption,
-                reply_to_message_id=job.message_id,
-                supports_streaming=True,
-            )
-        else:
-            await bot.send_document(
-                chat_id=job.chat_id,
-                document=FSInputFile(result.path),
-                caption=result.caption,
-                reply_to_message_id=job.message_id,
-            )
+        for item in result.all_items():
+            if item.path.stat().st_size > settings.max_file_bytes:
+                raise DownloadRejected(f"Файл больше {settings.max_file_mb} MB.")
+            if item.media_type == "photo":
+                await bot.send_photo(
+                    chat_id=job.chat_id,
+                    photo=FSInputFile(item.path),
+                    caption=item.caption,
+                    reply_to_message_id=job.message_id,
+                )
+            elif item.media_type == "video":
+                await bot.send_video(
+                    chat_id=job.chat_id,
+                    video=FSInputFile(item.path),
+                    caption=item.caption,
+                    reply_to_message_id=job.message_id,
+                    supports_streaming=True,
+                )
+            else:
+                await bot.send_document(
+                    chat_id=job.chat_id,
+                    document=FSInputFile(item.path),
+                    caption=item.caption,
+                    reply_to_message_id=job.message_id,
+                )
     except DownloadRejected as exc:
         await _send_error(bot, job, f"Не могу скачать: {exc}")
     except asyncio.TimeoutError:
@@ -80,7 +81,8 @@ async def process_job(redis: Redis, bot: Bot, job: MediaJob) -> None:
         log.exception("job failed %s: %s", job.id, exc)
     finally:
         if result:
-            cleanup_file(result.path)
+            for item in result.all_items():
+                cleanup_file(item.path)
         await redis.hdel(ACTIVE_JOBS, job.id)
         await _release(redis, job)
 
