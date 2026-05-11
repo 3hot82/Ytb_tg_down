@@ -500,7 +500,10 @@ def _download_with_fallbacks(url: str, job_id: str) -> DownloadResult:
                 final = _move_final(path, job_id)
                 log.info("downloaded job %s via yt-dlp: type=video path=%s", job_id, final)
                 return DownloadResult(path=final, media_type="video", caption=_caption_from_info(info), extractor="yt-dlp")
-            except (DownloadError, DownloadFailed, DownloadRejected) as exc:
+            except DownloadRejected as exc:
+                log.info("yt-dlp video rejected for %s: %s", job_id, exc)
+                raise
+            except (DownloadError, DownloadFailed) as exc:
                 last_error = exc
                 log.info("yt-dlp video attempt failed for %s: %s", job_id, exc)
 
