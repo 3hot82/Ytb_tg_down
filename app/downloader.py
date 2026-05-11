@@ -266,6 +266,7 @@ def _download_ytdlp_video(url: str, workdir: Path, fmt: str, *, merge: bool = Fa
                     {"key": "FFmpegMerger"},
                     {"key": "FFmpegThumbnailsConvertor", "format": "jpg", "when": "before_dl"},
                 ],
+                "postprocessor_args": {"ffmpeg": ["-movflags", "+faststart"]},
             }
         )
     with YoutubeDL(opts) as ydl:
