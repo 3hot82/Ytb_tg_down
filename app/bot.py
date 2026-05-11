@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from io import BytesIO
 import re
 from pathlib import Path
 from urllib.parse import urlparse
@@ -262,9 +263,9 @@ async def receive_cookies_file(message: Message, bot: Bot) -> None:
         return
 
     tg_file = await bot.get_file(message.document.file_id)
-    buffer = bytearray()
+    buffer = BytesIO()
     await bot.download_file(tg_file.file_path, destination=buffer)
-    data = bytes(buffer)
+    data = buffer.getvalue()
     if not _looks_like_netscape_cookies(data):
         await message.answer("Файл не похож на Netscape cookies.txt. Экспортируйте cookies именно в формате cookies.txt.")
         return
