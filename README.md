@@ -213,17 +213,69 @@ Delete messages
 
 ## Cookies и Instagram
 
-Instagram, TikTok, VK и другие сайты иногда требуют авторизацию. Для этого в проекте есть optional `auth-browser`: серверный Chromium с noVNC.
+Instagram, TikTok, VK и другие сайты иногда требуют авторизацию. Основной удобный способ — экспортировать `cookies.txt` на своём устройстве и отправить файл боту.
 
 Схема такая:
 
 ```text
-вы открываете серверный Chromium
-→ логинитесь в Instagram внутри него
-→ browser profile остаётся в Docker volume
-→ бот экспортирует cookies в /app/data/cookies/instagram.txt
+вы логинитесь в Instagram/TikTok/VK в своём браузере
+→ экспортируете cookies в Netscape cookies.txt
+→ отправляете файл боту в Telegram
+→ бот сохраняет cookies в /app/data/cookies/*.txt
 → yt-dlp/gallery-dl используют эти cookies
 ```
+
+### Загрузка cookies через Telegram
+
+Команды доступны только пользователям из `ADMIN_IDS`.
+
+```text
+/cookies_upload
+```
+
+После команды отправьте cookies-файл документом. Лучше назвать файл по платформе:
+
+```text
+instagram.txt
+tiktok.txt
+vk.txt
+youtube.txt
+cookies.txt
+```
+
+Можно явно выбрать платформу:
+
+```text
+/cookies_upload_instagram
+/cookies_upload_tiktok
+/cookies_upload_vk
+```
+
+После этого бот попросит прислать файл и сохранит его в нужное место.
+
+Проверить статус:
+
+```text
+/cookies
+```
+
+### Где взять cookies.txt
+
+На ПК в обычном Google Chrome расширения есть. Можно установить расширение вроде `Cookie-Editor` или `Get cookies.txt LOCALLY`, открыть нужный сайт, войти в аккаунт и экспортировать cookies в формат Netscape `cookies.txt`.
+
+На Android обычный Chrome не поддерживает расширения. Для телефона обычно удобнее:
+
+- Kiwi Browser;
+- Lemur Browser;
+- другой Chromium-браузер с поддержкой Chrome extensions.
+
+В таком браузере можно поставить `Cookie-Editor` / `Get cookies.txt LOCALLY`, войти в Instagram и экспортировать `cookies.txt`.
+
+На iPhone/iOS экспорт cookies из браузера сильно ограничен. Надёжнее сделать экспорт один раз с ПК/Mac или Android-браузера с расширениями.
+
+### Optional: auth-browser на сервере
+
+В проекте также есть optional `auth-browser`: серверный Chromium/noVNC. Это запасной вариант, если удобнее логиниться на сервере. На телефонах web-VNC может работать нестабильно, поэтому для мобильного сценария лучше использовать upload cookies-файла.
 
 ### Запуск auth-browser
 
@@ -239,9 +291,9 @@ http://127.0.0.1:33000/
 
 Это безопасный дефолт. Не открывайте этот порт напрямую в интернет без HTTPS и авторизации.
 
-### Доступ с телефона
+### Доступ к auth-browser с телефона
 
-Рекомендуемая схема:
+Если всё-таки используете удалённый браузер, рекомендуемая схема:
 
 ```text
 телефон
@@ -261,9 +313,7 @@ http://127.0.0.1:33000/
 
 Не монтируйте Docker socket внутрь бота. Это даёт боту слишком много прав на хосте.
 
-### Команды для cookies
-
-Команды доступны только пользователям из `ADMIN_IDS`.
+### Команды для auth-browser
 
 ```text
 /login
@@ -280,12 +330,6 @@ http://127.0.0.1:33000/
 ```text
 /app/data/cookies/instagram.txt
 ```
-
-```text
-/cookies
-```
-
-Показывает наличие cookie-файлов.
 
 После экспорта можно остановить браузер:
 
