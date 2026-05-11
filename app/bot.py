@@ -27,13 +27,13 @@ log = logging.getLogger(__name__)
 def _bot_session() -> AiohttpSession | None:
     if not settings.telegram_api_base_url:
         return None
-    api_base = settings.telegram_api_base_url.rstrip("/")
-    if api_base.endswith("/{method}"):
-        api_base = api_base[: -len("/{method}")]
-    api_file = settings.telegram_api_file_url.rstrip("/") or f"{api_base}/file"
-    if api_file.endswith("/{path}"):
-        api_file = api_file[: -len("/{path}")]
-    return AiohttpSession(api=TelegramAPIServer(base=api_base, file=api_file, is_local=True))
+    return AiohttpSession(
+        api=TelegramAPIServer(
+            base=settings.telegram_api_base_url,
+            file=settings.telegram_api_file_url,
+            is_local=True,
+        )
+    )
 
 
 URL_RE = re.compile(r"https?://[^\s<>()]+", re.IGNORECASE)
