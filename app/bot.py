@@ -21,6 +21,7 @@ from .redis_keys import CHAT_COOLDOWN_PREFIX, CHAT_LOCK_PREFIX, JOB_PREFIX, PAUS
 
 log = logging.getLogger(__name__)
 URL_RE = re.compile(r"https?://[^\s<>()]+", re.IGNORECASE)
+INSTAGRAM_USERNAME_RE = re.compile(r"^[A-Za-z0-9._]{1,30}$")
 SUPPORTED_HOST_RE = re.compile(
     r"(^|\.)(youtube\.com|youtu\.be|tiktok\.com|vm\.tiktok\.com|vt\.tiktok\.com|vk\.com|m\.vk\.com|vkvideo\.ru|instagram\.com|www\.instagram\.com|instagr\.am)$",
     re.IGNORECASE,
@@ -67,6 +68,7 @@ async def _setup_bot_commands(bot: Bot) -> None:
     admin_commands = [
         BotCommand(command="start", description="Как пользоваться ботом"),
         BotCommand(command="login", description="Открыть серверный браузер для логина"),
+        BotCommand(command="stories", description="Скачать Instagram stories username"),
         BotCommand(command="cookies", description="Проверить статус cookies"),
         BotCommand(command="cookies_upload", description="Загрузить cookies.txt файлом"),
         BotCommand(command="cookies_upload_instagram", description="Загрузить Instagram cookies"),
@@ -179,6 +181,37 @@ async def _export_cookies(platform: str = "instagram") -> tuple[bool, str]:
     except OSError:
         pass
     return True, f"exported {cookies_path.stat().st_size} bytes to {cookies_path}"
+
+
+
+
+async def _queue_url(message: Message, url: str) -> None:
+    assert redis is not None
+    if await redis.get(PAUSE_FLAG):
+        await _temporary_reply(message, "Обновляю загрузчик, новые задачи временно на паузе. Попробуйте чуть позже.")
+        return
+
+    chat_id = message.chat.id
+    cooldown_key = f"{CHAT_COOLDOWN_PREFIX}{chat_id}"
+    if not await redis.set(cooldown_key, "1", nx=True, ex=settings.chat_cooldown_seconds):
+        await _temporary_reply(message, f"Слишком часто 🙂 Подождите {settings.chat_cooldown_seconds} сек.")
+        return
+
+    lock_key = f"{CHAT_LOCK_PREFIX}{chat_id}"
+    job = MediaJob.create(
+        chat_id=chat_id,
+        user_id=message.from_user.id if message.from_user else None,
+        message_id=message.message_id,
+        url=url,
+        status_message_id=None,
+    )
+    if not await redis.set(lock_key, job.id, nx=True, ex=settings.active_job_idle_timeout_seconds):
+        await _temporary_reply(message, "В этом чате уже есть активная загрузка. Дождитесь завершения.")
+        return
+
+    await redis.set(f"{JOB_PREFIX}{job.id}", job.dumps(), ex=settings.job_ttl_seconds)
+    await redis.rpush(settings.queue_name, job.dumps())
+    log.info("queued job %s chat=%s url=%s", job.id, chat_id, url)
 
 
 @router.message(CommandStart())
@@ -315,38 +348,25 @@ async def cookies_export(message: Message) -> None:
     await status.edit_text(f"{text}\n{details}")
 
 
+@router.message(Command("stories"))
+async def instagram_stories(message: Message) -> None:
+    args = (message.text or "").split(maxsplit=1)
+    if len(args) < 2:
+        await message.answer("Напишите username после команды, например:\n/stories instagram")
+        return
+    username = args[1].strip().lstrip("@")
+    if not INSTAGRAM_USERNAME_RE.fullmatch(username):
+        await message.answer("Не похоже на Instagram username. Пример: /stories instagram")
+        return
+    await _queue_url(message, f"https://www.instagram.com/stories/{username}/")
+
+
 @router.message(F.text | F.caption)
 async def catch_media_link(message: Message) -> None:
-    assert redis is not None
     url = _extract_supported_url(message.text or message.caption)
     if not url:
         return
-
-    if await redis.get(PAUSE_FLAG):
-        await _temporary_reply(message, "Обновляю загрузчик, новые задачи временно на паузе. Попробуйте чуть позже.")
-        return
-
-    chat_id = message.chat.id
-    cooldown_key = f"{CHAT_COOLDOWN_PREFIX}{chat_id}"
-    if not await redis.set(cooldown_key, "1", nx=True, ex=settings.chat_cooldown_seconds):
-        await _temporary_reply(message, f"Слишком часто 🙂 Подождите {settings.chat_cooldown_seconds} сек.")
-        return
-
-    lock_key = f"{CHAT_LOCK_PREFIX}{chat_id}"
-    job = MediaJob.create(
-        chat_id=chat_id,
-        user_id=message.from_user.id if message.from_user else None,
-        message_id=message.message_id,
-        url=url,
-        status_message_id=None,
-    )
-    if not await redis.set(lock_key, job.id, nx=True, ex=settings.active_job_idle_timeout_seconds):
-        await _temporary_reply(message, "В этом чате уже есть активная загрузка. Дождитесь завершения.")
-        return
-
-    await redis.set(f"{JOB_PREFIX}{job.id}", job.dumps(), ex=settings.job_ttl_seconds)
-    await redis.rpush(settings.queue_name, job.dumps())
-    log.info("queued job %s chat=%s url=%s", job.id, chat_id, url)
+    await _queue_url(message, url)
 
 
 async def main() -> None:

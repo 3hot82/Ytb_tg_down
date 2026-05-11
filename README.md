@@ -155,6 +155,20 @@ docker compose down -v
 https://www.youtube.com/watch?v=...
 ```
 
+Instagram stories можно скачивать без копирования ссылки из приложения:
+
+```text
+/stories username
+```
+
+Например:
+
+```text
+/stories instagram
+```
+
+Для сторис нужны актуальные `instagram.txt` cookies, а аккаунт из cookies должен иметь доступ к этим сторис.
+
 ### В группе
 
 Добавьте бота в группу и отправьте ссылку.
