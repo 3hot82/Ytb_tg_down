@@ -433,7 +433,7 @@ def _download_with_fallbacks(url: str, job_id: str) -> DownloadResult:
     ]
     last_error: Exception | None = None
     platform = _host_platform(url)
-    prefer_gallery = platform == "instagram" and any(marker in url for marker in ("/p/", "/reel/", "/reels/"))
+    prefer_gallery = platform == "instagram" and any(marker in url for marker in ("/p/", "/reel/", "/reels/", "/stories/"))
     try:
         if prefer_gallery:
             try:
