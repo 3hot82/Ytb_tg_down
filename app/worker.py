@@ -192,11 +192,13 @@ async def process_job(redis: Redis, bot: Bot, job: MediaJob) -> None:
             elif item.media_type == "video":
                 generated_thumbnail = _make_video_thumbnail(item.path)
                 thumbnail = item.thumbnail_path or generated_thumbnail
+                cover = item.cover_path
                 try:
                     sent = await bot.send_video(
                         chat_id=job.chat_id,
                         video=FSInputFile(item.path),
                         thumbnail=FSInputFile(thumbnail) if thumbnail else None,
+                        cover=FSInputFile(cover) if cover else None,
                         caption=item.caption,
                         reply_to_message_id=job.message_id,
                         supports_streaming=True,

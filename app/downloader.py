@@ -258,6 +258,9 @@ def _download_ytdlp_video(url: str, workdir: Path, fmt: str, *, merge: bool = Fa
             "max_filesize": settings.max_file_bytes,
             "writethumbnail": True,
             "convertthumbnails": "jpg",
+            "embedsubs": False,
+            "embed_chapters": True,
+            "postprocessors": [{"key": "FFmpegMetadata"}],
         }
     )
     if merge:
@@ -267,6 +270,7 @@ def _download_ytdlp_video(url: str, workdir: Path, fmt: str, *, merge: bool = Fa
                 "postprocessors": [
                     {"key": "FFmpegMerger"},
                     {"key": "FFmpegThumbnailsConvertor", "format": "jpg", "when": "before_dl"},
+                    {"key": "FFmpegMetadata"},
                 ],
                 "postprocessor_args": {"ffmpeg": ["-movflags", "+faststart"]},
             }
