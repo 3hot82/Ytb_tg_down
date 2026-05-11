@@ -280,7 +280,7 @@ def _download_ytdlp_video(url: str, workdir: Path, fmt: str, *, merge: bool = Fa
     opts.update(
         {
             "format": fmt,
-            "format_sort": ["+res", "+br", "+size", "+fps", "vcodec:h264", "acodec:aac"],
+            "format_sort": ["res", "+br", "+size", "+fps", "vcodec:h264", "acodec:aac"],
             "max_filesize": settings.max_file_bytes,
             "remote_components": ["ejs:github"],
             "writethumbnail": True,
@@ -597,7 +597,7 @@ def _download_with_fallbacks(url: str, job_id: str, max_duration_seconds: int | 
             except DownloadRejected as exc:
                 log.info("yt-dlp video rejected for %s: %s", job_id, exc)
                 raise
-            except (DownloadError, DownloadFailed) as exc:
+            except (DownloadError, DownloadFailed, OSError) as exc:
                 last_error = exc
                 log.info("yt-dlp video attempt failed for %s: %s", job_id, exc)
 
