@@ -4,6 +4,8 @@ import asyncio
 import logging
 
 from aiogram import Bot
+from aiogram.client.session.aiohttp import AiohttpSession
+from aiogram.client.telegram import TelegramAPIServer
 from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError
 from aiogram.types import FSInputFile
 from redis.asyncio import Redis
@@ -14,6 +16,20 @@ from .models import MediaJob
 from .redis_keys import ACTIVE_JOBS, CHAT_LOCK_PREFIX, JOB_PREFIX, PAUSE_FLAG
 
 log = logging.getLogger(__name__)
+
+
+def _bot_session() -> AiohttpSession | None:
+    if not settings.telegram_api_base_url:
+        return None
+    api_base = settings.telegram_api_base_url.rstrip("/")
+    if api_base.endswith("/{method}"):
+        api_base = api_base[: -len("/{method}")]
+    api_file = settings.telegram_api_file_url.rstrip("/") or f"{api_base}/file"
+    if api_file.endswith("/{path}"):
+        api_file = api_file[: -len("/{path}")]
+    return AiohttpSession(api=TelegramAPIServer(base=api_base, file=api_file, is_local=True))
+
+
 
 
 async def _release(redis: Redis, job: MediaJob) -> None:
@@ -92,7 +108,7 @@ async def main() -> None:
     if not settings.bot_token:
         raise RuntimeError("BOT_TOKEN is required")
     redis = Redis.from_url(settings.redis_url, decode_responses=True)
-    bot = Bot(settings.bot_token)
+    bot = Bot(settings.bot_token, session=_bot_session())
     try:
         while True:
             if await redis.get(PAUSE_FLAG):

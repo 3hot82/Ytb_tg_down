@@ -40,6 +40,8 @@ Self-hosted Telegram-бот для скачивания коротких вид�
 
 По умолчанию используется обычный cloud Telegram Bot API, поэтому лимит отправляемого ботом файла — около `50 MB`.
 
+Для больших файлов можно включить официальный локальный Telegram Bot API server. Тогда лимит можно поднять, например до `2000 MB`, но серверу понадобится больше места, трафика и времени на отправку.
+
 В MVP намеренно не поддерживаются:
 
 - плейлисты;
@@ -462,7 +464,60 @@ docker compose up -d bot
 
 ### Файл больше 50 MB
 
-Это лимит стандартного Telegram Bot API. Уменьшите `MAX_FILE_MB`, ограничьте длительность или используйте официальный локальный Telegram Bot API server.
+Это лимит стандартного cloud Telegram Bot API. Уменьшите `MAX_FILE_MB`, ограничьте длительность или включите локальный Telegram Bot API server.
+
+## Большие файлы через локальный Telegram Bot API server
+
+Для upload больших файлов бот может работать через официальный локальный Telegram Bot API server.
+
+### 1. Получите API ID и API HASH
+
+Откройте:
+
+```text
+https://my.telegram.org/apps
+```
+
+Создайте приложение и получите:
+
+```text
+TELEGRAM_API_ID
+TELEGRAM_API_HASH
+```
+
+Это секреты. Не публикуйте их.
+
+### 2. Включите настройки в `.env`
+
+```env
+TELEGRAM_API_ID=123456
+TELEGRAM_API_HASH=your_api_hash
+TELEGRAM_BOT_API_PORT=8081
+TELEGRAM_API_BASE_URL=http://telegram-bot-api:8081/bot{token}/{method}
+TELEGRAM_API_FILE_URL=http://telegram-bot-api:8081/file/bot{token}/{path}
+MAX_FILE_MB=2000
+```
+
+### 3. Запустите локальный API server
+
+```bash
+docker compose --profile local-api up -d telegram-bot-api
+```
+
+### 4. Перезапустите бота и worker
+
+```bash
+docker compose up -d --build bot worker
+```
+
+Проверить:
+
+```bash
+docker compose ps telegram-bot-api bot worker
+docker compose logs -f telegram-bot-api bot worker
+```
+
+Порт local API по умолчанию проброшен только на `127.0.0.1`, наружу его открывать не нужно.
 
 ### Instagram не скачивается
 

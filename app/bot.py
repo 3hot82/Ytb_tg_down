@@ -9,6 +9,8 @@ from urllib.parse import urlparse, urlunparse
 
 from aiogram import Bot, Dispatcher, F, Router
 from aiogram.client.default import DefaultBotProperties
+from aiogram.client.session.aiohttp import AiohttpSession
+from aiogram.client.telegram import TelegramAPIServer
 from aiogram.enums import ParseMode
 from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError
 from aiogram.filters import Command, CommandStart
@@ -20,6 +22,20 @@ from .models import MediaJob
 from .redis_keys import CHAT_COOLDOWN_PREFIX, CHAT_LOCK_PREFIX, JOB_PREFIX, PAUSE_FLAG
 
 log = logging.getLogger(__name__)
+
+
+def _bot_session() -> AiohttpSession | None:
+    if not settings.telegram_api_base_url:
+        return None
+    api_base = settings.telegram_api_base_url.rstrip("/")
+    if api_base.endswith("/{method}"):
+        api_base = api_base[: -len("/{method}")]
+    api_file = settings.telegram_api_file_url.rstrip("/") or f"{api_base}/file"
+    if api_file.endswith("/{path}"):
+        api_file = api_file[: -len("/{path}")]
+    return AiohttpSession(api=TelegramAPIServer(base=api_base, file=api_file, is_local=True))
+
+
 URL_RE = re.compile(r"https?://[^\s<>()]+", re.IGNORECASE)
 INSTAGRAM_USERNAME_RE = re.compile(r"^[A-Za-z0-9._]{1,30}$")
 SUPPORTED_HOST_RE = re.compile(
@@ -414,7 +430,7 @@ async def main() -> None:
 
     global redis
     redis = Redis.from_url(settings.redis_url, decode_responses=True)
-    bot = Bot(settings.bot_token, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
+    bot = Bot(settings.bot_token, session=_bot_session(), default=DefaultBotProperties(parse_mode=ParseMode.HTML))
     dp = Dispatcher()
     dp.include_router(router)
     await _setup_bot_commands(bot)
