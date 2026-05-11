@@ -273,7 +273,7 @@ def _download_ytdlp_video(url: str, workdir: Path, fmt: str, *, merge: bool = Fa
         info = ydl.extract_info(url, download=False)
         _validate_info(info, max_duration_seconds=max_duration_seconds)
         ydl.download([url])
-    found = _find_file(workdir, {".mp4"})
+    found = _find_file(workdir, {".mp4"}) or _find_file(workdir, {".webm"})
     if not found:
         raise DownloadFailed("MP4 файл не найден после загрузки.")
     if not _filesize_ok(found):
@@ -512,6 +512,7 @@ def _download_with_fallbacks(url: str, job_id: str, max_duration_seconds: int | 
         ("worst[ext=mp4][vcodec^=avc1][acodec^=mp4a]/best[ext=mp4][vcodec^=avc1][acodec^=mp4a][height<=480]/best[ext=mp4][vcodec^=avc1][acodec^=mp4a]", False),
         ("worst[ext=mp4][vcodec!=none][acodec!=none]/best[ext=mp4][vcodec!=none][acodec!=none][height<=480]/best[ext=mp4][vcodec!=none][acodec!=none]", False),
         ("worstvideo[ext=mp4][vcodec^=avc1][height<=480]+worstaudio[ext=m4a]/bestvideo[ext=mp4][vcodec^=avc1][height<=480]+bestaudio[ext=m4a]/bestvideo[ext=mp4][vcodec^=avc1]+bestaudio[ext=m4a]", True),
+        ("best[ext=webm][vcodec^=vp9][height<=1080]/best[ext=webm][vcodec^=av1][height<=1080]/best[ext=webm]", True),
         ("worst[ext=mp4]/best[ext=mp4][height<=480]/best[ext=mp4]/best", False),
     ]
     last_error: Exception | None = None
