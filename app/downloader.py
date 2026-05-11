@@ -45,6 +45,7 @@ class DownloadItem:
     cover_path: Path | None = None
     width: int | None = None
     height: int | None = None
+    duration: int | None = None
 
 
 @dataclass(frozen=True)
@@ -445,6 +446,22 @@ def _move_thumbnail(path: Path | None, job_id: str) -> Path | None:
     return final
 
 
+
+def _extract_frame_cover(video_path: Path, job_id: str) -> Path | None:
+    """Extract first frame from video as cover using ffmpeg (fast, no re-encode)."""
+    cover_path = DOWNLOAD_DIR / f"{job_id}.cover.jpg"
+    try:
+        subprocess.run(
+            ["ffmpeg", "-y", "-ss", "1", "-i", str(video_path), "-vframes", "1", "-q:v", "2", str(cover_path)],
+            capture_output=True, timeout=60, check=True,
+        )
+        if cover_path.exists() and cover_path.stat().st_size > 0:
+            return cover_path
+        log.warning("extracted frame cover empty for %s", job_id)
+    except Exception as exc:
+        log.warning("failed to extract frame cover for %s: %s", job_id, exc)
+    return None
+
 def _move_final(path: Path, job_id: str) -> Path:
     final = DOWNLOAD_DIR / f"{job_id}{path.suffix.lower()}"
     shutil.move(str(path), final)
@@ -541,14 +558,15 @@ def _download_with_fallbacks(url: str, job_id: str, max_duration_seconds: int | 
                 if not _is_telegram_mp4(path):
                     log.warning("%s is not confirmed h264+aac; accepting as video fallback", path)
                 final = _move_final(path, job_id)
-                cover = _move_thumbnail(thumbnail_path, job_id)
+                frame_cover = _extract_frame_cover(final, job_id)
+                cover = frame_cover or _move_thumbnail(thumbnail_path, job_id)
                 log.info("downloaded job %s via yt-dlp: type=video path=%s cover=%s", job_id, final, bool(cover))
                 return DownloadResult(
                     path=final,
                     media_type="video",
                     caption=_caption_from_info(info),
                     extractor="yt-dlp",
-                    items=(DownloadItem(final, "video", _caption_from_info(info), cover_path=cover, width=info.get("width"), height=info.get("height")),),
+                    items=(DownloadItem(final, "video", _caption_from_info(info), cover_path=cover, width=info.get("width"), height=info.get("height"), duration=info.get("duration")),),
                 )
             except DownloadRejected as exc:
                 log.info("yt-dlp video rejected for %s: %s", job_id, exc)
