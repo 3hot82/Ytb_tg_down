@@ -507,6 +507,9 @@ def _download_with_fallbacks(url: str, job_id: str) -> DownloadResult:
                 last_error = exc
                 log.info("yt-dlp video attempt failed for %s: %s", job_id, exc)
 
+        if platform == "youtube":
+            raise DownloadFailed(str(last_error) if last_error else "yt-dlp не смог скачать YouTube-видео.")
+
         if not prefer_gallery:
             try:
                 return _try_gallery_dl(url, workdir, job_id)
