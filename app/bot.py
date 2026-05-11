@@ -99,9 +99,37 @@ def _platform_from_filename(filename: str | None) -> str | None:
     stem = Path(name).stem
     if stem in COOKIE_PLATFORMS:
         return stem
-    for platform in COOKIE_PLATFORMS:
+    for platform in COOKIE_PLATFORMS - {"cookies"}:
         if platform in name:
             return platform
+    return None
+
+
+def _platform_from_cookie_data(data: bytes) -> str | None:
+    text = data.decode("utf-8", errors="ignore").lower()
+    domains: list[str] = []
+    for line in text.splitlines():
+        if not line or line.startswith("#"):
+            continue
+        parts = line.split("\t")
+        if len(parts) >= 7:
+            domains.append(parts[0].lstrip("."))
+    haystack = "\n".join(domains) if domains else text
+    matches: set[str] = set()
+    domain_markers = {
+        "instagram": ("instagram.com", ".instagram.com"),
+        "tiktok": ("tiktok.com", ".tiktok.com"),
+        "vk": ("vk.com", ".vk.com", "vkvideo.ru", ".vkvideo.ru"),
+        "youtube": ("youtube.com", ".youtube.com", "youtu.be", ".youtu.be", "googlevideo.com", ".googlevideo.com"),
+        "twitter": ("twitter.com", ".twitter.com", "x.com", ".x.com"),
+    }
+    for platform, markers in domain_markers.items():
+        if any(marker in haystack for marker in markers):
+            matches.add(platform)
+    if len(matches) == 1:
+        return next(iter(matches))
+    if len(matches) > 1:
+        return "cookies"
     return None
 
 
@@ -228,15 +256,6 @@ async def receive_cookies_file(message: Message, bot: Bot) -> None:
         return
 
     filename = message.document.file_name or ""
-    platform = _platform_from_filename(filename)
-    if not platform and message.from_user:
-        platform = await redis.get(f"{COOKIE_UPLOAD_PREFIX}{message.from_user.id}")
-    if not platform:
-        await message.answer(
-            "Не понял, для какой платформы cookies.\n"
-            "Назовите файл instagram.txt/tiktok.txt/vk.txt или сначала отправьте /cookies_upload_instagram."
-        )
-        return
 
     if message.document.file_size and message.document.file_size > 2_000_000:
         await message.answer("Файл слишком большой для cookies.txt. Проверьте, что отправляете правильный файл.")
@@ -250,6 +269,27 @@ async def receive_cookies_file(message: Message, bot: Bot) -> None:
         await message.answer("Файл не похож на Netscape cookies.txt. Экспортируйте cookies именно в формате cookies.txt.")
         return
 
+    filename_platform = _platform_from_filename(filename)
+    detected_platform = _platform_from_cookie_data(data)
+    pending_platform = await redis.get(f"{COOKIE_UPLOAD_PREFIX}{message.from_user.id}") if message.from_user else None
+
+    platform = None
+    if pending_platform:
+        platform = pending_platform
+    elif filename_platform and filename_platform != "cookies":
+        platform = filename_platform
+    elif detected_platform:
+        platform = detected_platform
+    else:
+        platform = filename_platform
+
+    if not platform:
+        await message.answer(
+            "Не понял, для какой платформы cookies.\n"
+            "Назовите файл instagram.txt/tiktok.txt/vk.txt или сначала отправьте /cookies_upload_instagram."
+        )
+        return
+
     cookies_dir = Path(settings.data_dir) / "cookies"
     cookies_dir.mkdir(parents=True, exist_ok=True)
     path = cookies_dir / f"{platform}.txt"
@@ -260,7 +300,8 @@ async def receive_cookies_file(message: Message, bot: Bot) -> None:
         pass
     if message.from_user:
         await redis.delete(f"{COOKIE_UPLOAD_PREFIX}{message.from_user.id}")
-    await message.answer(f"✅ Cookies для {platform} сохранены: {path.stat().st_size} bytes")
+    source = "определил по содержимому" if detected_platform and platform == detected_platform else "выбрал по команде/имени файла"
+    await message.answer(f"✅ Cookies для {platform} сохранены: {path.stat().st_size} bytes ({source})")
 
 
 @router.message(Command("cookies_export"))
