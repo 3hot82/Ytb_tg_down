@@ -146,8 +146,12 @@ async def _cache_sent_message(
         log.warning("job %s sent but no file_id returned for cache", job.id)
         return
     safe_caption = (caption or "").replace("\t", " ").replace("\n", " ")
-    await redis.set(f"{MEDIA_CACHE_PREFIX}{job.url}", f"{media_type}\t{file_id}\t{safe_caption}")
-    log.info("cached telegram file_id for url=%s type=%s", job.url, media_type)
+    await redis.set(
+        f"{MEDIA_CACHE_PREFIX}{job.url}",
+        f"{media_type}\t{file_id}\t{safe_caption}",
+        ex=settings.media_cache_ttl_seconds,
+    )
+    log.info("cached telegram file_id for url=%s type=%s ttl=%s", job.url, media_type, settings.media_cache_ttl_seconds)
 
 
 async def process_job(redis: Redis, bot: Bot, job: MediaJob) -> None:

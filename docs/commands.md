@@ -23,7 +23,9 @@ https://vk.com/...
 
 ### Принудительно скачать заново
 
-Если бот отправил битый/неотображаемый файл из Telegram `file_id` cache, обойдите кэш:
+Telegram `file_id` cache хранится 90 дней по умолчанию (`MEDIA_CACHE_TTL_SECONDS=7776000`).
+
+Если бот отправил битый/неотображаемый файл из cache, обойдите кэш:
 
 ```text
 /redownload https://youtu.be/...

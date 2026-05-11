@@ -45,6 +45,7 @@ class Settings:
     job_ttl_seconds: int = _int("JOB_TTL_SECONDS", 1800)
     chat_cooldown_seconds: int = _int("CHAT_COOLDOWN_SECONDS", 20)
     active_job_idle_timeout_seconds: int = _int("ACTIVE_JOB_IDLE_TIMEOUT_SECONDS", 1800)
+    media_cache_ttl_seconds: int = _int("MEDIA_CACHE_TTL_SECONDS", 7776000)
     ytdlp_update_interval_seconds: int = _int("YTDLP_UPDATE_INTERVAL_SECONDS", 21600)
     ytdlp_update_poll_seconds: int = _int("YTDLP_UPDATE_POLL_SECONDS", 10)
     ytdlp_restart_after_update: bool = _bool("YTDLP_RESTART_AFTER_UPDATE", False)
