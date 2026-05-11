@@ -35,7 +35,7 @@ redis: Redis | None = None
 
 
 
-def _instagram_profile_to_stories_url(url: str) -> str | None:
+def _instagram_profile_username(url: str) -> str | None:
     parsed = urlparse(url)
     host = parsed.netloc.lower().split(":", 1)[0]
     if host not in {"instagram.com", "www.instagram.com", "m.instagram.com"}:
@@ -47,11 +47,27 @@ def _instagram_profile_to_stories_url(url: str) -> str | None:
     reserved = {"p", "reel", "reels", "stories", "explore", "accounts", "direct", "tv"}
     if username.lower() in reserved or not INSTAGRAM_USERNAME_RE.fullmatch(username):
         return None
+    return username
+
+
+def _instagram_stories_url(username: str) -> str:
     return urlunparse(("https", "www.instagram.com", f"/stories/{username}/", "", "", ""))
 
 
-def _normalize_supported_url(url: str) -> str:
-    return _instagram_profile_to_stories_url(url) or url
+def _stories_url_from_arg(arg: str) -> str | None:
+    arg = arg.strip()
+    profile_username = _instagram_profile_username(arg)
+    if profile_username:
+        return _instagram_stories_url(profile_username)
+    username = arg.lstrip("@")
+    if INSTAGRAM_USERNAME_RE.fullmatch(username):
+        return _instagram_stories_url(username)
+    return None
+
+
+def _is_instagram_profile_url(url: str) -> bool:
+    return _instagram_profile_username(url) is not None
+
 
 def _extract_supported_url(text: str | None) -> str | None:
     if not text:
@@ -60,7 +76,9 @@ def _extract_supported_url(text: str | None) -> str | None:
         url = match.group(0).rstrip(".,;!?)\"]}")
         host = urlparse(url).netloc.lower().split(":", 1)[0]
         if SUPPORTED_HOST_RE.search(host):
-            return _normalize_supported_url(url)
+            if _is_instagram_profile_url(url):
+                return None
+            return url
     return None
 
 
@@ -374,11 +392,11 @@ async def instagram_stories(message: Message) -> None:
     if len(args) < 2:
         await message.answer("Напишите username после команды, например:\n/stories instagram")
         return
-    username = args[1].strip().lstrip("@")
-    if not INSTAGRAM_USERNAME_RE.fullmatch(username):
-        await message.answer("Не похоже на Instagram username. Пример: /stories instagram")
+    stories_url = _stories_url_from_arg(args[1])
+    if not stories_url:
+        await message.answer("Не понял username или ссылку на профиль. Пример:\n/stories instagram\n/stories https://www.instagram.com/instagram")
         return
-    await _queue_url(message, f"https://www.instagram.com/stories/{username}/")
+    await _queue_url(message, stories_url)
 
 
 @router.message(F.text | F.caption)
