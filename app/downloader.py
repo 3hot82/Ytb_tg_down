@@ -43,6 +43,7 @@ class DownloadItem:
     path: Path
     media_type: Literal["photo", "video", "document"]
     caption: str | None = None
+    thumbnail_path: Path | None = None
 
 
 @dataclass(frozen=True)
@@ -403,6 +404,78 @@ def _download_og_media(url: str, workdir: Path) -> tuple[Path, dict[str, Any]]:
     return target, {"title": title, "description": description}
 
 
+
+
+def _thumbnail_url(info: dict[str, Any]) -> str | None:
+    thumbnails = info.get("thumbnails")
+    if isinstance(thumbnails, list):
+        for thumb in reversed(thumbnails):
+            if isinstance(thumb, dict) and thumb.get("url"):
+                return str(thumb["url"])
+    if info.get("thumbnail"):
+        return str(info["thumbnail"])
+    return None
+
+
+def _download_thumbnail(info: dict[str, Any], job_id: str) -> Path | None:
+    url = _thumbnail_url(info)
+    if not url:
+        return None
+    raw_path = DOWNLOAD_DIR / f"{job_id}.thumb.src"
+    thumb_path = DOWNLOAD_DIR / f"{job_id}.thumb.jpg"
+    try:
+        request = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+        with urllib.request.urlopen(request, timeout=30) as response:
+            raw_path.write_bytes(response.read(5 * 1024 * 1024))
+        proc = subprocess.run(
+            [
+                "ffmpeg",
+                "-y",
+                "-i",
+                str(raw_path),
+                "-frames:v",
+                "1",
+                "-vf",
+                "scale='min(320,iw)':-2",
+                "-q:v",
+                "5",
+                str(thumb_path),
+            ],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            check=False,
+        )
+        if proc.returncode == 0 and thumb_path.exists() and 0 < thumb_path.stat().st_size <= 200_000:
+            return thumb_path
+        # Retry lower quality for Telegram thumbnail size limits.
+        proc = subprocess.run(
+            [
+                "ffmpeg",
+                "-y",
+                "-i",
+                str(raw_path),
+                "-frames:v",
+                "1",
+                "-vf",
+                "scale='min(320,iw)':-2",
+                "-q:v",
+                "8",
+                str(thumb_path),
+            ],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            check=False,
+        )
+        if proc.returncode == 0 and thumb_path.exists() and 0 < thumb_path.stat().st_size <= 200_000:
+            return thumb_path
+    except (TimeoutError, socket.timeout, OSError) as exc:
+        log.info("failed to download thumbnail for %s: %s", job_id, exc)
+    finally:
+        raw_path.unlink(missing_ok=True)
+    thumb_path.unlink(missing_ok=True)
+    return None
+
+
 def _move_final(path: Path, job_id: str) -> Path:
     final = DOWNLOAD_DIR / f"{job_id}{path.suffix.lower()}"
     shutil.move(str(path), final)
@@ -498,8 +571,15 @@ def _download_with_fallbacks(url: str, job_id: str) -> DownloadResult:
                 if not _is_telegram_mp4(path):
                     log.warning("%s is not confirmed h264+aac; accepting as video fallback", path)
                 final = _move_final(path, job_id)
-                log.info("downloaded job %s via yt-dlp: type=video path=%s", job_id, final)
-                return DownloadResult(path=final, media_type="video", caption=_caption_from_info(info), extractor="yt-dlp")
+                thumbnail = _download_thumbnail(info, job_id)
+                log.info("downloaded job %s via yt-dlp: type=video path=%s thumbnail=%s", job_id, final, bool(thumbnail))
+                return DownloadResult(
+                    path=final,
+                    media_type="video",
+                    caption=_caption_from_info(info),
+                    extractor="yt-dlp",
+                    items=(DownloadItem(final, "video", _caption_from_info(info), thumbnail),),
+                )
             except DownloadRejected as exc:
                 log.info("yt-dlp video rejected for %s: %s", job_id, exc)
                 raise

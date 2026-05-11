@@ -106,7 +106,8 @@ async def process_job(redis: Redis, bot: Bot, job: MediaJob) -> None:
                     reply_to_message_id=job.message_id,
                 )
             elif item.media_type == "video":
-                thumbnail = _make_video_thumbnail(item.path)
+                generated_thumbnail = None if item.thumbnail_path else _make_video_thumbnail(item.path)
+                thumbnail = item.thumbnail_path or generated_thumbnail
                 try:
                     await bot.send_video(
                         chat_id=job.chat_id,
@@ -117,8 +118,8 @@ async def process_job(redis: Redis, bot: Bot, job: MediaJob) -> None:
                         supports_streaming=True,
                     )
                 finally:
-                    if thumbnail:
-                        thumbnail.unlink(missing_ok=True)
+                    if generated_thumbnail:
+                        generated_thumbnail.unlink(missing_ok=True)
             else:
                 await bot.send_document(
                     chat_id=job.chat_id,
@@ -138,6 +139,8 @@ async def process_job(redis: Redis, bot: Bot, job: MediaJob) -> None:
         if result:
             for item in result.all_items():
                 cleanup_file(item.path)
+                if item.thumbnail_path:
+                    cleanup_file(item.thumbnail_path)
         await redis.hdel(ACTIVE_JOBS, job.id)
         await _release(redis, job)
 
