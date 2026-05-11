@@ -20,6 +20,7 @@ services:
       TELEGRAM_VERBOSITY: "2"
     volumes:
       - telegram-bot-api-data:/var/lib/telegram-bot-api
+      - downloads:/app/downloads
     ports:
       - "127.0.0.1:${TELEGRAM_BOT_API_PORT:-8081}:8081"
 

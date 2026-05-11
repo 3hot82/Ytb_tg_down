@@ -106,13 +106,15 @@ async def process_job(redis: Redis, bot: Bot, job: MediaJob) -> None:
                     reply_to_message_id=job.message_id,
                 )
             elif item.media_type == "video":
-                generated_thumbnail = None if item.thumbnail_path else _make_video_thumbnail(item.path)
+                generated_thumbnail = _make_video_thumbnail(item.path)
                 thumbnail = item.thumbnail_path or generated_thumbnail
+                cover = item.cover_path
                 try:
                     await bot.send_video(
                         chat_id=job.chat_id,
                         video=FSInputFile(item.path),
                         thumbnail=FSInputFile(thumbnail) if thumbnail else None,
+                        cover=FSInputFile(cover) if cover else None,
                         caption=item.caption,
                         reply_to_message_id=job.message_id,
                         supports_streaming=True,
@@ -141,6 +143,8 @@ async def process_job(redis: Redis, bot: Bot, job: MediaJob) -> None:
                 cleanup_file(item.path)
                 if item.thumbnail_path:
                     cleanup_file(item.thumbnail_path)
+                if item.cover_path:
+                    cleanup_file(item.cover_path)
         await redis.hdel(ACTIVE_JOBS, job.id)
         await _release(redis, job)
 

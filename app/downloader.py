@@ -7,9 +7,7 @@ import logging
 import os
 import re
 import shutil
-import socket
 import subprocess
-import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal
@@ -44,6 +42,7 @@ class DownloadItem:
     media_type: Literal["photo", "video", "document"]
     caption: str | None = None
     thumbnail_path: Path | None = None
+    cover_path: Path | None = None
 
 
 @dataclass(frozen=True)
@@ -245,7 +244,7 @@ def _ytdlp_opts_for_url(url: str, workdir: Path) -> dict[str, Any]:
     return opts
 
 
-def _download_ytdlp_video(url: str, workdir: Path, fmt: str, *, merge: bool = False) -> tuple[Path, dict[str, Any]]:
+def _download_ytdlp_video(url: str, workdir: Path, fmt: str, *, merge: bool = False) -> tuple[Path, dict[str, Any], Path | None]:
     _check_ytdlp_bin()
     opts = _ytdlp_opts_for_url(url, workdir)
     opts.update(
@@ -253,10 +252,20 @@ def _download_ytdlp_video(url: str, workdir: Path, fmt: str, *, merge: bool = Fa
             "format": fmt,
             "format_sort": ["+size", "+br", "+res", "+fps", "vcodec:h264", "acodec:aac"],
             "max_filesize": settings.max_file_bytes,
+            "writethumbnail": True,
+            "convertthumbnails": "jpg",
         }
     )
     if merge:
-        opts.update({"merge_output_format": "mp4", "postprocessors": [{"key": "FFmpegMerger"}]})
+        opts.update(
+            {
+                "merge_output_format": "mp4",
+                "postprocessors": [
+                    {"key": "FFmpegMerger"},
+                    {"key": "FFmpegThumbnailsConvertor", "format": "jpg", "when": "before_dl"},
+                ],
+            }
+        )
     with YoutubeDL(opts) as ydl:
         info = ydl.extract_info(url, download=False)
         _validate_info(info)
@@ -266,7 +275,8 @@ def _download_ytdlp_video(url: str, workdir: Path, fmt: str, *, merge: bool = Fa
         raise DownloadFailed("MP4 файл не найден после загрузки.")
     if not _filesize_ok(found):
         raise DownloadRejected(f"Файл больше {settings.max_file_mb} MB.")
-    return found, info
+    thumbnail = _find_ytdlp_thumbnail(workdir, found)
+    return found, info, thumbnail
 
 
 def _gallery_dl_config() -> None:
@@ -406,74 +416,24 @@ def _download_og_media(url: str, workdir: Path) -> tuple[Path, dict[str, Any]]:
 
 
 
-def _thumbnail_url(info: dict[str, Any]) -> str | None:
-    thumbnails = info.get("thumbnails")
-    if isinstance(thumbnails, list):
-        for thumb in reversed(thumbnails):
-            if isinstance(thumb, dict) and thumb.get("url"):
-                return str(thumb["url"])
-    if info.get("thumbnail"):
-        return str(info["thumbnail"])
-    return None
-
-
-def _download_thumbnail(info: dict[str, Any], job_id: str) -> Path | None:
-    url = _thumbnail_url(info)
-    if not url:
+def _find_ytdlp_thumbnail(workdir: Path, video_path: Path) -> Path | None:
+    candidates = [
+        path
+        for path in workdir.rglob("*")
+        if path.is_file() and path.suffix.lower() in IMAGE_EXTS and path != video_path
+    ]
+    if not candidates:
         return None
-    raw_path = DOWNLOAD_DIR / f"{job_id}.thumb.src"
-    thumb_path = DOWNLOAD_DIR / f"{job_id}.thumb.jpg"
-    try:
-        request = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
-        with urllib.request.urlopen(request, timeout=30) as response:
-            raw_path.write_bytes(response.read(5 * 1024 * 1024))
-        proc = subprocess.run(
-            [
-                "ffmpeg",
-                "-y",
-                "-i",
-                str(raw_path),
-                "-frames:v",
-                "1",
-                "-vf",
-                "scale='min(320,iw)':-2",
-                "-q:v",
-                "5",
-                str(thumb_path),
-            ],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            check=False,
-        )
-        if proc.returncode == 0 and thumb_path.exists() and 0 < thumb_path.stat().st_size <= 200_000:
-            return thumb_path
-        # Retry lower quality for Telegram thumbnail size limits.
-        proc = subprocess.run(
-            [
-                "ffmpeg",
-                "-y",
-                "-i",
-                str(raw_path),
-                "-frames:v",
-                "1",
-                "-vf",
-                "scale='min(320,iw)':-2",
-                "-q:v",
-                "8",
-                str(thumb_path),
-            ],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            check=False,
-        )
-        if proc.returncode == 0 and thumb_path.exists() and 0 < thumb_path.stat().st_size <= 200_000:
-            return thumb_path
-    except (TimeoutError, socket.timeout, OSError) as exc:
-        log.info("failed to download thumbnail for %s: %s", job_id, exc)
-    finally:
-        raw_path.unlink(missing_ok=True)
-    thumb_path.unlink(missing_ok=True)
-    return None
+    jpg_candidates = [path for path in candidates if path.suffix.lower() in {".jpg", ".jpeg"}]
+    return max(jpg_candidates or candidates, key=lambda path: path.stat().st_size)
+
+
+def _move_thumbnail(path: Path | None, job_id: str) -> Path | None:
+    if not path:
+        return None
+    final = DOWNLOAD_DIR / f"{job_id}.thumb{path.suffix.lower()}"
+    shutil.move(str(path), final)
+    return final
 
 
 def _move_final(path: Path, job_id: str) -> Path:
@@ -565,20 +525,20 @@ def _download_with_fallbacks(url: str, job_id: str) -> DownloadResult:
         for fmt, merge in formats:
             _clear_workdir(workdir)
             try:
-                path, info = _download_ytdlp_video(url, workdir, fmt, merge=merge)
+                path, info, thumbnail_path = _download_ytdlp_video(url, workdir, fmt, merge=merge)
                 if path.suffix.lower() != ".mp4":
                     raise DownloadFailed("Получился не MP4 файл.")
                 if not _is_telegram_mp4(path):
                     log.warning("%s is not confirmed h264+aac; accepting as video fallback", path)
                 final = _move_final(path, job_id)
-                thumbnail = _download_thumbnail(info, job_id)
-                log.info("downloaded job %s via yt-dlp: type=video path=%s thumbnail=%s", job_id, final, bool(thumbnail))
+                cover = _move_thumbnail(thumbnail_path, job_id)
+                log.info("downloaded job %s via yt-dlp: type=video path=%s cover=%s", job_id, final, bool(cover))
                 return DownloadResult(
                     path=final,
                     media_type="video",
                     caption=_caption_from_info(info),
                     extractor="yt-dlp",
-                    items=(DownloadItem(final, "video", _caption_from_info(info), thumbnail),),
+                    items=(DownloadItem(final, "video", _caption_from_info(info), cover_path=cover),),
                 )
             except DownloadRejected as exc:
                 log.info("yt-dlp video rejected for %s: %s", job_id, exc)
