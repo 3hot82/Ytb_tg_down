@@ -43,8 +43,6 @@ class DownloadItem:
     caption: str | None = None
     thumbnail_path: Path | None = None
     cover_path: Path | None = None
-    width: int | None = None
-    height: int | None = None
 
 
 @dataclass(frozen=True)
@@ -544,7 +542,7 @@ def _download_with_fallbacks(url: str, job_id: str, max_duration_seconds: int | 
                     media_type="video",
                     caption=_caption_from_info(info),
                     extractor="yt-dlp",
-                    items=(DownloadItem(final, "video", _caption_from_info(info), cover_path=cover, width=info.get("width"), height=info.get("height")),),
+                    items=(DownloadItem(final, "video", _caption_from_info(info), cover_path=cover),),
                 )
             except DownloadRejected as exc:
                 log.info("yt-dlp video rejected for %s: %s", job_id, exc)

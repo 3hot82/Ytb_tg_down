@@ -202,8 +202,6 @@ async def process_job(redis: Redis, bot: Bot, job: MediaJob) -> None:
                         caption=item.caption,
                         reply_to_message_id=job.message_id,
                         supports_streaming=True,
-                        width=item.width,
-                        height=item.height,
                     )
                     await _cache_sent_message(redis, job, "video", sent, item.caption, enabled=cache_enabled)
                 finally:
