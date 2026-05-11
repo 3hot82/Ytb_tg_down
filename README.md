@@ -1,263 +1,234 @@
 # Ytb TG Down
 
-Self-hosted Telegram-бот для скачивания коротких видео и фото по ссылкам из Telegram.
+Self-hosted Telegram-бот для скачивания медиа по ссылкам.
 
-Бот принимает ссылку на YouTube, TikTok, VK или Instagram, скачивает медиа через `yt-dlp`/`gallery-dl` и отправляет файл обратно в чат.
+Бот принимает ссылки из Telegram, скачивает медиа через `yt-dlp` / `gallery-dl` и отправляет результат обратно в чат.
 
-## Что умеет
+Поддерживается:
 
-- Работает в личных чатах, группах и супергруппах.
-- Скачивает видео через `yt-dlp`.
-- Использует `gallery-dl` как fallback для фото, галерей и сложных постов.
-- Использует `og:image`/`og:video`, если основные загрузчики не справились.
-- Отправляет результат как `video`, `photo` или `document`.
-- Ограничивает размер файла под стандартный Telegram Bot API: по умолчанию `50 MB`.
-- Не засоряет чат служебными сообщениями.
-- Держит одну активную загрузку на чат.
-- Поддерживает cookies для Instagram и других сайтов через серверный Chromium/noVNC.
-- Может обновлять runtime `yt-dlp` отдельным watcher-сервисом.
+- YouTube / youtu.be — только `yt-dlp`;
+- TikTok;
+- VK / VK Video;
+- Instagram posts/reels/stories;
+- cookies для сайтов, где нужна авторизация;
+- локальный Telegram Bot API server для файлов больше cloud-лимита.
 
-## Из чего состоит
+## Состав
 
-- Python 3.12
-- `aiogram`
-- `yt-dlp`
-- `gallery-dl`
-- `ffmpeg` / `ffprobe`
-- Redis
-- Docker Compose
-- optional auth-browser: `lscr.io/linuxserver/chromium`
+Docker Compose сервисы:
 
-Сервисы Docker Compose:
-
-- `bot` — слушает Telegram и ставит задачи в очередь;
-- `worker` — скачивает медиа и отправляет результат;
-- `watcher` — обновляет `yt-dlp` без остановки активных скачиваний;
-- `redis` — очередь, locks и служебное состояние;
+- `bot` — принимает сообщения Telegram и ставит задачи в Redis;
+- `worker` — скачивает и отправляет медиа;
+- `watcher` — обновляет runtime `yt-dlp`;
+- `redis` — очередь и locks;
+- `telegram-bot-api` — optional локальный Bot API server для больших файлов.
 - `auth-browser` — optional Chromium/noVNC для входа в Instagram и экспорта cookies.
 
-## Ограничения
-
-По умолчанию используется обычный cloud Telegram Bot API, поэтому лимит отправляемого ботом файла — около `50 MB`.
-
-Для больших файлов можно включить официальный локальный Telegram Bot API server. Тогда лимит можно поднять, например до `2000 MB`, но серверу понадобится больше места, трафика и времени на отправку.
-
-В MVP намеренно не поддерживаются:
-
-- плейлисты;
-- batch-альбомы;
-- live/upcoming видео;
-- тяжёлое перекодирование.
-
-Бот старается выбирать Telegram-compatible формат:
-
-1. MP4/H.264/AAC;
-2. минимальное подходящее качество;
-3. если видео и аудио идут отдельно — merge через `ffmpeg` без перекодирования.
-
 ## Быстрый старт
-
-### 1. Установите Docker
-
-Нужны Docker и Docker Compose plugin.
-
-Проверка:
-
-```bash
-docker --version
-docker compose version
-```
-
-### 2. Скачайте проект
 
 ```bash
 git clone https://github.com/3hot82/Ytb_tg_down.git
 cd Ytb_tg_down
-```
-
-### 3. Создайте Telegram-бота
-
-1. Откройте [@BotFather](https://t.me/BotFather).
-2. Выполните команду:
-
-```text
-/newbot
-```
-
-3. Выберите имя и username бота.
-4. Скопируйте токен, который выдаст BotFather.
-
-Токен выглядит примерно так:
-
-```text
-123456789:AA...
-```
-
-Это секрет. Не публикуйте его и не коммитьте в GitHub.
-
-### 4. Настройте `.env`
-
-```bash
 cp .env.example .env
 nano .env
 ```
 
-Минимально нужно заполнить:
+Минимум для запуска через обычный cloud Telegram Bot API:
 
 ```env
-BOT_TOKEN=ваш_токен_от_BotFather
-ADMIN_IDS=ваш_telegram_user_id
+BOT_TOKEN=123456:replace_me
+ADMIN_IDS=123456789
+MAX_FILE_MB=50
+TELEGRAM_API_BASE_URL=
+TELEGRAM_API_FILE_URL=
 ```
 
-`ADMIN_IDS` нужен для админ-команд:
+Где взять:
 
-- `/login`
-- `/cookies`
-- `/cookies_export`
+- `BOT_TOKEN` — у [@BotFather](https://t.me/BotFather) через `/newbot`;
+- `ADMIN_IDS` — numeric Telegram user id, например через `@userinfobot`.
 
-Свой numeric Telegram user id можно узнать через [@userinfobot](https://t.me/userinfobot) или похожего бота.
-
-### 5. Запустите бота
+Запуск:
 
 ```bash
 docker compose up -d --build
 ```
 
-Посмотреть логи:
+Проверка:
 
 ```bash
-docker compose logs -f bot worker watcher
+docker compose ps
+docker compose logs -f bot worker
 ```
 
-Остановить:
+Остановка:
 
 ```bash
 docker compose down
 ```
 
-Остановить и удалить volumes, включая Redis queue, downloads, cookies и browser profile:
+Остановка с удалением volumes, включая cookies/profile/downloads/Redis:
 
 ```bash
 docker compose down -v
 ```
 
-Команду с `-v` используйте осторожно.
+`down -v` используйте осторожно.
+
+## Режимы Telegram API
+
+Бот умеет работать в двух режимах. Переключение делается через `.env`.
+
+### 1. Cloud Bot API, стандартный режим
+
+Это обычный API Telegram. Ничего дополнительно поднимать не нужно.
+
+```env
+MAX_FILE_MB=50
+TELEGRAM_API_BASE_URL=
+TELEGRAM_API_FILE_URL=
+```
+
+Плюсы:
+
+- проще всего;
+- не нужны `api_id/api_hash`;
+- меньше локальной инфраструктуры.
+
+Минус:
+
+- загрузка ботом ограничена cloud Bot API, обычно около `50 MB`.
+
+### 2. Local Telegram Bot API server, большие файлы
+
+Нужен, чтобы бот мог отправлять большие файлы через официальный локальный `telegram-bot-api` server.
+
+Получите `api_id` и `api_hash`:
+
+```text
+https://my.telegram.org/apps
+```
+
+Важно: вход делается обычным пользовательским Telegram-аккаунтом. Ботом получить `api_id/api_hash` нельзя.
+
+В `.env`:
+
+```env
+TELEGRAM_API_ID=123456
+TELEGRAM_API_HASH=your_api_hash
+TELEGRAM_BOT_API_PORT=8081
+TELEGRAM_API_BASE_URL=http://telegram-bot-api:8081/bot{token}/{method}
+TELEGRAM_API_FILE_URL=http://telegram-bot-api:8081/file/bot{token}/{path}
+MAX_FILE_MB=2000
+MAX_DURATION_SECONDS=7200
+DOWNLOAD_TIMEOUT_SECONDS=3600
+JOB_TTL_SECONDS=7200
+ACTIVE_JOB_IDLE_TIMEOUT_SECONDS=7200
+```
+
+Запустить локальный сервер:
+
+```bash
+docker compose --profile local-api up -d telegram-bot-api
+```
+
+Перезапустить bot/worker, чтобы они начали ходить в локальный API:
+
+```bash
+docker compose up -d --build bot worker
+```
+
+Проверка:
+
+```bash
+docker compose ps telegram-bot-api bot worker
+docker compose logs -f telegram-bot-api bot worker
+```
+
+Отключить локальный сервер и вернуться на cloud API:
+
+```env
+MAX_FILE_MB=50
+TELEGRAM_API_BASE_URL=
+TELEGRAM_API_FILE_URL=
+```
+
+Затем:
+
+```bash
+docker compose up -d --build bot worker
+docker compose stop telegram-bot-api
+```
+
+Примечания:
+
+- порт local API проброшен только на `127.0.0.1:${TELEGRAM_BOT_API_PORT:-8081}`;
+- наружу его открывать не нужно;
+- volume `downloads` подключён к `telegram-bot-api`, чтобы local API видел файлы worker напрямую;
+- `TELEGRAM_API_ID`, `TELEGRAM_API_HASH` и `BOT_TOKEN` — секреты, не коммитьте их.
 
 ## Как пользоваться
 
-### В личном чате
-
-1. Напишите боту `/start`.
-2. Отправьте ссылку на поддерживаемый сайт.
-3. Дождитесь файла в ответ.
-
-Пример:
+Отправьте ссылку боту:
 
 ```text
-https://www.youtube.com/watch?v=...
+https://youtu.be/...
+https://www.tiktok.com/...
+https://vk.com/...
+https://www.instagram.com/reel/...
 ```
 
-Instagram stories можно скачивать без копирования ссылки из приложения:
+Бот поставит задачу в очередь, скачает медиа и отправит файл ответом на сообщение.
+
+Для Instagram stories:
 
 ```text
 /stories username
+/stories @username
+/stories https://www.instagram.com/username?igsh=...
 ```
 
-Например:
+Обычная ссылка на Instagram-профиль сама по себе не запускает скачивание stories. Для stories нужна явная команда `/stories`.
+
+## Группы
+
+Чтобы бот видел обычные ссылки в группе, выключите Privacy Mode:
+
+1. откройте [@BotFather](https://t.me/BotFather);
+2. `/mybots`;
+3. выберите бота;
+4. `Bot Settings` → `Group Privacy` → `Turn off`;
+5. удалите бота из группы и добавьте снова.
+
+Если Privacy Mode включён, пишите ссылку с упоминанием:
 
 ```text
-/stories instagram
+@your_bot_username https://youtube.com/...
 ```
-
-В команду можно передать и ссылку на профиль:
-
-```text
-/stories https://www.instagram.com/username
-```
-
-Просто ссылка на профиль без команды `/stories` не запускает скачивание. Это сделано специально, чтобы бот случайно не пытался качать профиль или сторис, когда в чат просто прислали ссылку на человека.
-
-Для сторис нужны актуальные `instagram.txt` cookies, а аккаунт из cookies должен иметь доступ к этим сторис.
-
-### В группе
-
-Добавьте бота в группу и отправьте ссылку.
-
-Если у бота включён Telegram Privacy Mode, он видит не все сообщения в группе. В таком режиме отправляйте ссылку с упоминанием бота:
-
-```text
-@your_bot_username https://www.youtube.com/watch?v=...
-```
-
-или reply на сообщение бота.
-
-Если хотите, чтобы бот сам ловил обычные ссылки в группе, выключите Privacy Mode.
-
-## Как выключить Privacy Mode в BotFather
-
-1. Откройте [@BotFather](https://t.me/BotFather).
-2. Выполните:
-
-```text
-/mybots
-```
-
-3. Выберите вашего бота.
-4. Откройте `Bot Settings`.
-5. Откройте `Group Privacy`.
-6. Нажмите `Turn off`.
-7. Если бот уже был в группе, удалите его из группы и добавьте снова.
-
-После этого бот сможет видеть обычные текстовые сообщения в группе и ловить ссылки без упоминания.
-
-## Какие права нужны боту в группе
-
-Для базовой работы обычно достаточно добавить бота участником группы.
-
-Полезно дать право:
-
-```text
-Delete messages
-```
-
-Оно нужно, чтобы бот мог удалять свои временные сообщения об ошибках.
-
-Если в группе запрещена отправка media, разрешите боту отправлять фото/видео/документы.
-
-## Личный бот только для себя
-
-Самый простой вариант:
-
-1. Создайте бота через BotFather.
-2. Не добавляйте его в публичные группы.
-3. Никому не передавайте username и токен.
-4. Пишите ссылки только в личный чат с ботом.
-
-Важно: текущая версия не содержит allowlist для обычных скачиваний. Если бот добавлен в группу или кто-то нашёл его username и написал ему, он сможет поставить задачу на скачивание. Для строго приватного режима добавьте проверку `ALLOWED_USER_IDS`/`ALLOWED_CHAT_IDS` в обработчик ссылок.
 
 ## Cookies и Instagram
 
-Instagram, TikTok, VK и другие сайты иногда требуют авторизацию. Основной удобный способ — экспортировать `cookies.txt` на своём устройстве и отправить файл боту.
+Некоторые сайты требуют cookies. Особенно часто это Instagram, TikTok, VK и YouTube age/private content.
 
-Схема такая:
+Админ-команды доступны только пользователям из `ADMIN_IDS`.
 
-```text
-вы логинитесь в Instagram/TikTok/VK в своём браузере
-→ экспортируете cookies в Netscape cookies.txt
-→ отправляете файл боту в Telegram
-→ бот сохраняет cookies в /app/data/cookies/*.txt
-→ yt-dlp/gallery-dl используют эти cookies
-```
+### Загрузить cookies через Telegram
 
-### Загрузка cookies через Telegram
-
-Команды доступны только пользователям из `ADMIN_IDS`.
+Отправьте боту:
 
 ```text
-/cookies_upload
+/cookies instagram
 ```
 
-После команды отправьте cookies-файл документом. Бот умеет определить платформу по доменам внутри файла, даже если имя файла случайное. Но для надёжности лучше назвать файл по платформе:
+Потом прикрепите файл `instagram.txt` или `cookies.txt`.
+
+Проверить:
+
+```text
+/cookies
+```
+
+Поддерживаемые имена:
 
 ```text
 instagram.txt
@@ -268,293 +239,121 @@ twitter.txt
 cookies.txt
 ```
 
-Если в одном файле cookies сразу от нескольких сайтов, бот сохранит его как общий `cookies.txt`. Такой файл используется как fallback, если для конкретной платформы нет своего файла.
+### Auth-browser для cookies
 
-Можно явно выбрать платформу:
-
-```text
-/cookies_upload_instagram
-/cookies_upload_tiktok
-/cookies_upload_vk
-```
-
-После этого бот попросит прислать файл и сохранит его в нужное место.
-
-Проверить статус:
-
-```text
-/cookies
-```
-
-### Для каких сайтов лучше иметь cookies
-
-Рекомендуемый минимум:
-
-- `instagram.txt` — Instagram чаще всего требует cookies для постов, reels, фото, приватности, антибот-проверок.
-- `tiktok.txt` — TikTok часто меняет ограничения и может требовать сессию/региональные cookies.
-- `vk.txt` — VK/VK Video может требовать авторизацию для части видео и групп.
-
-Опционально:
-
-- `youtube.txt` — обычно YouTube работает без cookies, но они нужны для age-restricted/private/unlisted/member-контента, CAPTCHA/soft-block и иногда rate-limit. yt-dlp предупреждает, что аккаунт может получить временные ограничения, поэтому лучше использовать отдельный/неосновной аккаунт.
-- `twitter.txt` — для X/Twitter cookies нужны для части медиа, NSFW, ограниченного или login-only контента.
-- `cookies.txt` — общий fallback-файл, если не хотите разделять по сайтам.
-
-По документации yt-dlp cookies должны быть в Mozilla/Netscape формате, первая строка обычно `# Netscape HTTP Cookie File` или `# HTTP Cookie File`. gallery-dl тоже умеет использовать cookies-файлы и передавать их загрузчикам.
-
-### Где взять cookies.txt
-
-На ПК в обычном Google Chrome расширения есть. Можно установить расширение вроде `Cookie-Editor` или `Get cookies.txt LOCALLY`, открыть нужный сайт, войти в аккаунт и экспортировать cookies в формат Netscape `cookies.txt`.
-
-На Android обычный Chrome не поддерживает расширения. Для телефона обычно удобнее:
-
-- Kiwi Browser;
-- Lemur Browser;
-- другой Chromium-браузер с поддержкой Chrome extensions.
-
-В таком браузере можно поставить `Cookie-Editor` / `Get cookies.txt LOCALLY`, войти в Instagram и экспортировать `cookies.txt`.
-
-На iPhone/iOS экспорт cookies из браузера сильно ограничен. Надёжнее сделать экспорт один раз с ПК/Mac или Android-браузера с расширениями.
-
-### Optional: auth-browser на сервере
-
-В проекте также есть optional `auth-browser`: серверный Chromium/noVNC. Это запасной вариант, если удобнее логиниться на сервере. На телефонах web-VNC может работать нестабильно, поэтому для мобильного сценария лучше использовать upload cookies-файла.
-
-### Запуск auth-browser
+Можно поднять серверный Chromium:
 
 ```bash
 docker compose --profile auth up -d auth-browser
 ```
 
-По умолчанию браузер доступен только локально на сервере:
+Открыть:
 
 ```text
 http://127.0.0.1:33000/
 ```
 
-Это безопасный дефолт. Не открывайте этот порт напрямую в интернет без HTTPS и авторизации.
-
-### Доступ к auth-browser с телефона
-
-Если всё-таки используете удалённый браузер, рекомендуемая схема:
-
-```text
-телефон
-  → HTTPS reverse proxy на VPS
-  → Basic Auth + длинный случайный path
-  → SSH reverse tunnel
-  → auth-browser на 127.0.0.1:33000
-```
-
-Минимум защиты:
-
-- HTTPS;
-- Basic Auth;
-- длинный случайный path;
-- не публиковать URL;
-- останавливать `auth-browser` после экспорта cookies.
-
-Не монтируйте Docker socket внутрь бота. Это даёт боту слишком много прав на хосте.
-
-### Команды для auth-browser
-
-```text
-/login
-```
-
-Показывает ссылку на auth-browser из `AUTH_BROWSER_URL`.
+Войти в нужный сайт, затем отправить боту:
 
 ```text
 /cookies_export
 ```
 
-Экспортирует Instagram cookies из Chromium profile в:
+Auth-browser защищайте паролем через `.env`:
 
-```text
-/app/data/cookies/instagram.txt
+```env
+AUTH_BROWSER_USER=admin
+AUTH_BROWSER_PASSWORD=replace_with_long_random_password
+AUTH_BROWSER_URL=http://127.0.0.1:33000/
 ```
 
-После экспорта можно остановить браузер:
-
-```bash
-docker compose stop auth-browser
-```
-
-## Основные настройки
-
-Все настройки лежат в `.env`.
-
-Самые важные:
+## Основные настройки `.env`
 
 ```env
 BOT_TOKEN=123456:replace_me
 ADMIN_IDS=123456789
+REDIS_URL=redis://redis:6379/0
+QUEUE_NAME=media_jobs
+
 MAX_FILE_MB=50
 MAX_DURATION_SECONDS=600
 DOWNLOAD_TIMEOUT_SECONDS=600
+JOB_TTL_SECONDS=1800
 CHAT_COOLDOWN_SECONDS=20
+ACTIVE_JOB_IDLE_TIMEOUT_SECONDS=1800
+
+TELEGRAM_API_ID=
+TELEGRAM_API_HASH=
+TELEGRAM_BOT_API_PORT=8081
+TELEGRAM_API_BASE_URL=
+TELEGRAM_API_FILE_URL=
+
+YTDLP_UPDATE_INTERVAL_SECONDS=21600
+YTDLP_UPDATE_POLL_SECONDS=10
+YTDLP_RESTART_AFTER_UPDATE=false
 YTDLP_BIN=/opt/ytdlp/yt-dlp
+
 DATA_DIR=/app/data
-AUTH_BROWSER_URL=http://127.0.0.1:33000/
-AUTH_BROWSER_USER=admin
-AUTH_BROWSER_PASSWORD=replace_with_long_random_password
+LOG_LEVEL=INFO
 ```
 
-Файл `.env` должен оставаться локальным. Не публикуйте его.
-
-## Что нельзя публиковать
-
-Не коммитьте и не выкладывайте:
-
-- `.env`;
-- `.env.*`, кроме `.env.example`;
-- `.auth-proxy.env`;
-- Telegram bot token;
-- Basic Auth пароли;
-- секретные reverse-proxy URL/path;
-- cookies;
-- browser profile;
-- Redis/download volumes;
-- логи;
-- SSH keys.
-
-## Проверка установки
-
-Проверить Python-код:
+## Проверка перед публикацией / деплоем
 
 ```bash
 python -m compileall app
-```
-
-Проверить Docker Compose config:
-
-```bash
 docker compose config
-```
-
-Проверить запущенные сервисы:
-
-```bash
 docker compose ps
 ```
 
-## Troubleshooting
+Проверить, что секреты не попали в git:
 
-### Бот не отвечает в группе
-
-Проверьте Privacy Mode в BotFather.
-
-Если privacy включён, отправляйте ссылку с упоминанием:
-
-```text
-@your_bot_username https://youtube.com/...
+```bash
+git status --short
+git ls-files .env
+grep -R "BOT_TOKEN\|TELEGRAM_API_HASH\|AUTH_BROWSER_PASSWORD" . \
+  --exclude=.env --exclude-dir=.git
 ```
 
-Если хотите автоловлю ссылок — выключите Group Privacy и пере-добавьте бота в группу.
+`git ls-files .env` не должен выводить `.env`.
+
+## Troubleshooting
 
 ### Бот не стартует или пишет Unauthorized
 
-Проверьте `BOT_TOKEN` в `.env`.
-
-После изменения `.env` перезапустите сервис:
+Проверьте `BOT_TOKEN` и перезапустите:
 
 ```bash
-docker compose up -d bot
+docker compose up -d --build bot
 ```
 
 ### Файл больше 50 MB
 
-Это лимит стандартного cloud Telegram Bot API. Уменьшите `MAX_FILE_MB`, ограничьте длительность или включите локальный Telegram Bot API server.
+В cloud-режиме это ожидаемо. Включите local Telegram Bot API server и поднимите `MAX_FILE_MB`.
 
-## Большие файлы через локальный Telegram Bot API server
+### Local Bot API работает, но бот молчит при больших файлах
 
-Для upload больших файлов бот может работать через официальный локальный Telegram Bot API server.
-
-### 1. Получите API ID и API HASH
-
-Откройте:
-
-```text
-https://my.telegram.org/apps
-```
-
-Создайте приложение и получите:
-
-```text
-TELEGRAM_API_ID
-TELEGRAM_API_HASH
-```
-
-Это секреты. Не публикуйте их.
-
-### 2. Включите настройки в `.env`
-
-```env
-TELEGRAM_API_ID=123456
-TELEGRAM_API_HASH=your_api_hash
-TELEGRAM_BOT_API_PORT=8081
-TELEGRAM_API_BASE_URL=http://telegram-bot-api:8081/bot{token}/{method}
-TELEGRAM_API_FILE_URL=http://telegram-bot-api:8081/file/bot{token}/{path}
-MAX_FILE_MB=2000
-```
-
-### 3. Запустите локальный API server
+Проверьте, что `telegram-bot-api` запущен и видит volume `downloads`:
 
 ```bash
-docker compose --profile local-api up -d telegram-bot-api
+docker compose ps telegram-bot-api worker
+docker compose logs -f telegram-bot-api worker
 ```
 
-### 4. Перезапустите бота и worker
+В `docker-compose.yml` у `telegram-bot-api` должен быть volume:
 
-```bash
-docker compose up -d --build bot worker
+```yaml
+- downloads:/app/downloads
 ```
-
-Проверить:
-
-```bash
-docker compose ps telegram-bot-api bot worker
-docker compose logs -f telegram-bot-api bot worker
-```
-
-Порт local API по умолчанию проброшен только на `127.0.0.1`, наружу его открывать не нужно.
 
 ### Instagram не скачивается
 
-1. Поднимите auth-browser:
-
-```bash
-docker compose --profile auth up -d auth-browser
-```
-
-2. Войдите в Instagram внутри серверного Chromium.
-3. Отправьте боту:
-
-```text
-/cookies_export
-```
-
-4. Проверьте:
+Проверьте cookies:
 
 ```text
 /cookies
 ```
 
-5. Повторите скачивание ссылки.
-
-### `/cookies_export` ругается на locked cookies database
-
-Остановите браузер и повторите экспорт:
-
-```bash
-docker compose stop auth-browser
-```
-
-Затем отправьте боту:
-
-```text
-/cookies_export
-```
+Если cookies старые — обновите через `/cookies instagram` или auth-browser + `/cookies_export`.
 
 ### Redis warning про `vm.overcommit_memory`
 
@@ -564,12 +363,26 @@ docker compose stop auth-browser
 sudo sysctl vm.overcommit_memory=1
 ```
 
-Для постоянной настройки добавьте в `/etc/sysctl.conf`:
+Постоянно:
 
-```text
-vm.overcommit_memory = 1
+```bash
+echo 'vm.overcommit_memory=1' | sudo tee /etc/sysctl.d/99-redis-overcommit.conf
+sudo sysctl --system
 ```
+
+## Что нельзя публиковать
+
+Не коммитьте и не выкладывайте:
+
+- `.env` и `.env.*`, кроме `.env.example`;
+- `BOT_TOKEN`;
+- `TELEGRAM_API_ID` / `TELEGRAM_API_HASH`;
+- cookies;
+- browser profile;
+- Redis/download volumes;
+- логи с токенами;
+- SSH keys и пароли.
 
 ## Disclaimer
 
-Используйте проект только для контента, который вы имеете право скачивать и пересылать. Соблюдайте правила сайтов-источников и законодательство вашей страны.
+Используйте только для контента, который вы имеете право скачивать и пересылать. Соблюдайте правила Telegram и сайтов-источников.
