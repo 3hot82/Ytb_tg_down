@@ -246,7 +246,7 @@ def _ytdlp_opts_for_url(url: str, workdir: Path) -> dict[str, Any]:
     return opts
 
 
-def _download_ytdlp_video(url: str, workdir: Path, fmt: str, *, merge: bool = False) -> tuple[Path, dict[str, Any], Path | None]:
+def _download_ytdlp_video(url: str, workdir: Path, fmt: str, *, merge: bool = False, max_duration_seconds: int | None = None) -> tuple[Path, dict[str, Any], Path | None]:
     _check_ytdlp_bin()
     opts = _ytdlp_opts_for_url(url, workdir)
     opts.update(
@@ -527,7 +527,7 @@ def _download_with_fallbacks(url: str, job_id: str, max_duration_seconds: int | 
         for fmt, merge in formats:
             _clear_workdir(workdir)
             try:
-                path, info, thumbnail_path = _download_ytdlp_video(url, workdir, fmt, merge=merge)
+                path, info, thumbnail_path = _download_ytdlp_video(url, workdir, fmt, merge=merge, max_duration_seconds=max_duration_seconds)
                 if path.suffix.lower() != ".mp4":
                     raise DownloadFailed("Получился не MP4 файл.")
                 if not _is_telegram_mp4(path):
