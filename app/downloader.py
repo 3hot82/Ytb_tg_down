@@ -110,8 +110,33 @@ def _clean_caption(text: str) -> str | None:
     return text
 
 
+def _fmt_time(seconds: float) -> str:
+    h, r = divmod(int(seconds), 3600)
+    m, s = divmod(r, 60)
+    if h:
+        return f"{h}:{m:02d}:{s:02d}"
+    return f"{m}:{s:02d}"
+
+
+def _chapters_text(chapters: list[dict] | None) -> str | None:
+    if not chapters:
+        return None
+    lines = []
+    for ch in chapters:
+        ts = _fmt_time(ch["start_time"])
+        title = ch.get("title", "")
+        lines.append(f"{ts} {title}" if title else f"{ts}")
+    return "\n".join(lines) if lines else None
+
+
 def _caption_from_info(info: dict[str, Any]) -> str | None:
-    return _clean_caption(str(info.get("title") or info.get("description") or ""))
+    caption = _clean_caption(str(info.get("title") or info.get("description") or ""))
+    chapters = info.get("chapters")
+    if chapters and caption:
+        ch_text = _chapters_text(chapters)
+        if ch_text:
+            caption += "\n\n" + ch_text
+    return caption
 
 
 def _host_platform(url: str) -> str | None:
