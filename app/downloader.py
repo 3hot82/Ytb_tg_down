@@ -13,6 +13,8 @@ from pathlib import Path
 from typing import Any, Literal
 from urllib.parse import urlparse
 
+from typing import Callable
+
 from yt_dlp import YoutubeDL
 from yt_dlp.utils import DownloadError
 
@@ -274,7 +276,7 @@ def _ytdlp_opts_for_url(url: str, workdir: Path) -> dict[str, Any]:
     return opts
 
 
-def _download_ytdlp_video(url: str, workdir: Path, fmt: str, *, merge: bool = False, max_duration_seconds: int | None = None) -> tuple[Path, dict[str, Any], Path | None]:
+def _download_ytdlp_video(url: str, workdir: Path, fmt: str, *, merge: bool = False, max_duration_seconds: int | None = None, progress_hook: Callable[[dict[str, Any]], None] | None = None) -> tuple[Path, dict[str, Any], Path | None]:
     _check_ytdlp_bin()
     opts = _ytdlp_opts_for_url(url, workdir)
     opts.update(
@@ -288,6 +290,7 @@ def _download_ytdlp_video(url: str, workdir: Path, fmt: str, *, merge: bool = Fa
             "embedsubs": False,
             "embed_chapters": True,
             "postprocessors": [{"key": "FFmpegMetadata"}],
+            "progress_hooks": [progress_hook] if progress_hook else [],
         }
     )
     if merge:
@@ -551,7 +554,7 @@ def _try_og_media(url: str, workdir: Path, job_id: str) -> DownloadResult:
     return result
 
 
-def _download_with_fallbacks(url: str, job_id: str, max_duration_seconds: int | None = None) -> DownloadResult:
+def _download_with_fallbacks(url: str, job_id: str, max_duration_seconds: int | None = None, progress_hook: Callable[[dict[str, Any]], None] | None = None) -> DownloadResult:
     DOWNLOAD_DIR.mkdir(parents=True, exist_ok=True)
     workdir = DOWNLOAD_DIR / job_id
     if workdir.exists():
@@ -578,7 +581,7 @@ def _download_with_fallbacks(url: str, job_id: str, max_duration_seconds: int | 
         for fmt, merge in formats:
             _clear_workdir(workdir)
             try:
-                path, info, thumbnail_path = _download_ytdlp_video(url, workdir, fmt, merge=merge, max_duration_seconds=max_duration_seconds)
+                path, info, thumbnail_path = _download_ytdlp_video(url, workdir, fmt, merge=merge, max_duration_seconds=max_duration_seconds, progress_hook=progress_hook)
                 if path.suffix.lower() != ".mp4":
                     raise DownloadFailed("Получился не MP4 файл.")
                 if not _is_telegram_mp4(path):
@@ -624,10 +627,10 @@ def _download_with_fallbacks(url: str, job_id: str, max_duration_seconds: int | 
         shutil.rmtree(workdir, ignore_errors=True)
 
 
-async def download_media(url: str, job_id: str, *, max_duration_seconds: int | None = None) -> DownloadResult:
+async def download_media(url: str, job_id: str, *, max_duration_seconds: int | None = None, progress_hook: Callable[[dict[str, Any]], None] | None = None, timeout_seconds: int | None = None) -> DownloadResult:
     return await asyncio.wait_for(
-        asyncio.to_thread(_download_with_fallbacks, url, job_id, max_duration_seconds),
-        timeout=settings.download_timeout_seconds,
+        asyncio.to_thread(_download_with_fallbacks, url, job_id, max_duration_seconds, progress_hook),
+        timeout=timeout_seconds if timeout_seconds is not None else settings.download_timeout_seconds,
     )
 
 

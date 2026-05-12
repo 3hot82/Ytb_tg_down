@@ -254,6 +254,11 @@ async def _queue_urls(message: Message, urls: list[str], *, force_download: bool
 
     chat_id = message.chat.id
     user_id = message.from_user.id if message.from_user else None
+    is_direct_chat = message.chat.type == "private"
+    progress_message_id = None
+    if is_direct_chat:
+        status = await message.answer("⏳ Принял ссылку. Жду очередь…", reply_to_message_id=message.message_id)
+        progress_message_id = status.message_id
     jobs = [
         MediaJob.create(
             chat_id=chat_id,
@@ -261,6 +266,8 @@ async def _queue_urls(message: Message, urls: list[str], *, force_download: bool
             message_id=message.message_id,
             url=url,
             status_message_id=None,
+            progress_chat_id=chat_id if is_direct_chat else None,
+            progress_message_id=progress_message_id,
             force_download=force_download,
         )
         for url in queue_urls

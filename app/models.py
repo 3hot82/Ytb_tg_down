@@ -15,6 +15,8 @@ class MediaJob:
     url: str
     created_at: float
     status_message_id: int | None = None
+    progress_chat_id: int | None = None
+    progress_message_id: int | None = None
     force_download: bool = False
 
     @classmethod
@@ -26,6 +28,8 @@ class MediaJob:
         message_id: int,
         url: str,
         status_message_id: int | None = None,
+        progress_chat_id: int | None = None,
+        progress_message_id: int | None = None,
         force_download: bool = False,
     ) -> "MediaJob":
         return cls(
@@ -36,6 +40,8 @@ class MediaJob:
             url=url,
             created_at=time.time(),
             status_message_id=status_message_id,
+            progress_chat_id=progress_chat_id,
+            progress_message_id=progress_message_id,
             force_download=force_download,
         )
 

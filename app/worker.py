@@ -4,6 +4,7 @@ import asyncio
 import json
 import logging
 import subprocess
+import time
 from pathlib import Path
 
 from aiogram import Bot
@@ -50,7 +51,30 @@ async def _delete_message(bot: Bot, chat_id: int, message_id: int | None) -> Non
         log.debug("failed to delete message chat=%s message=%s", chat_id, message_id, exc_info=True)
 
 
+def _progress_target(job: MediaJob) -> tuple[int, int] | None:
+    if job.progress_chat_id is None or job.progress_message_id is None:
+        return None
+    return job.progress_chat_id, job.progress_message_id
+
+
+async def _set_progress(bot: Bot, job: MediaJob, text: str) -> None:
+    target = _progress_target(job)
+    if not target:
+        return
+    chat_id, message_id = target
+    try:
+        await bot.edit_message_text(text, chat_id=chat_id, message_id=message_id)
+    except TelegramBadRequest as exc:
+        if "message is not modified" not in str(exc).lower():
+            log.debug("failed to edit progress chat=%s message=%s", chat_id, message_id, exc_info=True)
+    except TelegramForbiddenError:
+        log.debug("failed to edit progress chat=%s message=%s", chat_id, message_id, exc_info=True)
+
+
 async def _send_error(bot: Bot, job: MediaJob, text: str) -> None:
+    if _progress_target(job):
+        await _set_progress(bot, job, f"❌ {text}")
+        return
     msg = await bot.send_message(job.chat_id, text, reply_to_message_id=job.message_id)
     await asyncio.sleep(10)
     await _delete_message(bot, job.chat_id, msg.message_id)
@@ -168,10 +192,45 @@ async def process_job(redis: Redis, bot: Bot, job: MediaJob) -> None:
     await redis.hset(ACTIVE_JOBS, job.id, str(job.chat_id))
     await redis.expire(ACTIVE_JOBS, settings.job_ttl_seconds)
     result = None
+    loop = asyncio.get_running_loop()
+    last_progress = 0.0
+
+    def progress_hook(data: dict) -> None:
+        nonlocal last_progress
+        now = time.monotonic()
+        if now - last_progress < 3:
+            return
+        last_progress = now
+        total = data.get("total_bytes") or data.get("total_bytes_estimate")
+        downloaded = data.get("downloaded_bytes") or 0
+        status = data.get("status")
+        if status == "downloading" and total:
+            percent = min(downloaded / total * 100, 100)
+            downloaded_mb = downloaded / 1024 / 1024
+            total_mb = total / 1024 / 1024
+            text = f"⬇️ Скачиваю: {percent:.1f}% ({downloaded_mb:.0f}/{total_mb:.0f} MB)"
+        elif status == "finished":
+            text = "⚙️ Обрабатываю видео…"
+        else:
+            return
+        loop.call_soon_threadsafe(lambda: asyncio.create_task(_set_progress(bot, job, text)))
+
     try:
         if await _try_send_cached(redis, bot, job):
+            await _set_progress(bot, job, "✅ Отправил из кэша")
             return
-        result = await download_media(job.url, job.id)
+        is_admin = job.user_id is not None and job.user_id in settings.admin_ids
+        max_duration = 0 if is_admin else settings.max_duration_seconds
+        timeout_seconds = None if is_admin else settings.download_timeout_seconds
+        await _set_progress(bot, job, "🔎 Проверяю ссылку…")
+        result = await download_media(
+            job.url,
+            job.id,
+            max_duration_seconds=max_duration,
+            progress_hook=progress_hook,
+            timeout_seconds=timeout_seconds,
+        )
+        await _set_progress(bot, job, "📤 Отправляю видео…")
         media_info = describe_media(result.path)
         items = result.all_items()
         cache_enabled = len(items) == 1
@@ -187,6 +246,7 @@ async def process_job(redis: Redis, bot: Bot, job: MediaJob) -> None:
                     reply_to_message_id=job.message_id,
                 )
                 await _cache_sent_message(redis, job, "photo", sent, item.caption, enabled=cache_enabled)
+                await _set_progress(bot, job, "✅ Фото отправлено")
             elif item.media_type == "video":
                 generated_thumbnail = _make_video_thumbnail(item.path)
                 thumbnail = item.thumbnail_path or generated_thumbnail
@@ -203,6 +263,7 @@ async def process_job(redis: Redis, bot: Bot, job: MediaJob) -> None:
                         duration=item.duration,
                     )
                     await _cache_sent_message(redis, job, "video", sent, item.caption, enabled=cache_enabled)
+                    await _set_progress(bot, job, "✅ Видео отправлено")
                 finally:
                     if generated_thumbnail:
                         generated_thumbnail.unlink(missing_ok=True)
@@ -214,6 +275,7 @@ async def process_job(redis: Redis, bot: Bot, job: MediaJob) -> None:
                     reply_to_message_id=job.message_id,
                 )
                 await _cache_sent_message(redis, job, "document", sent, item.caption, enabled=cache_enabled)
+                await _set_progress(bot, job, "✅ Файл отправлен")
     except DownloadRejected as exc:
         await _send_error(bot, job, f"Не могу скачать: {exc}")
     except asyncio.TimeoutError:
