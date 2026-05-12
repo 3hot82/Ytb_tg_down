@@ -319,6 +319,29 @@ async def process_job(redis: Redis, bot: Bot, job: MediaJob) -> None:
         await _release(redis, job)
 
 
+async def _clear_startup_queue(redis: Redis) -> None:
+    if not settings.clear_queue_on_worker_start:
+        return
+    queued = await redis.llen(settings.queue_name)
+    pending_chat_keys = [key async for key in redis.scan_iter(f"{PENDING_JOBS_CHAT_PREFIX}*")]
+    pending_user_keys = [key async for key in redis.scan_iter(f"{PENDING_JOBS_USER_PREFIX}*")]
+    inflight_keys = [key async for key in redis.scan_iter(f"{URL_INFLIGHT_PREFIX}*")]
+    waiter_keys = [key async for key in redis.scan_iter(f"{URL_WAITERS_PREFIX}*")]
+    pipe = redis.pipeline()
+    pipe.delete(settings.queue_name, ACTIVE_JOBS)
+    for key in pending_chat_keys + pending_user_keys + inflight_keys + waiter_keys:
+        pipe.delete(key)
+    await pipe.execute()
+    log.info(
+        "worker startup queue guard cleared queued=%s pending_chat=%s pending_user=%s inflight=%s waiters=%s",
+        queued,
+        len(pending_chat_keys),
+        len(pending_user_keys),
+        len(inflight_keys),
+        len(waiter_keys),
+    )
+
+
 async def main() -> None:
     logging.basicConfig(level=settings.log_level, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
     if not settings.bot_token:
@@ -326,6 +349,7 @@ async def main() -> None:
     redis = Redis.from_url(settings.redis_url, decode_responses=True)
     bot = Bot(settings.bot_token, session=_bot_session())
     try:
+        await _clear_startup_queue(redis)
         while True:
             if await redis.get(PAUSE_FLAG):
                 await asyncio.sleep(2)

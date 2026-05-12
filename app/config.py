@@ -37,6 +37,7 @@ class Settings:
     bot_token: str = os.getenv("BOT_TOKEN", "")
     redis_url: str = os.getenv("REDIS_URL", "redis://redis:6379/0")
     queue_name: str = os.getenv("QUEUE_NAME", "media_jobs")
+    clear_queue_on_worker_start: bool = _bool("CLEAR_QUEUE_ON_WORKER_START", True)
     max_file_mb: int = _int("MAX_FILE_MB", 50)
     video_codec_mode: str = os.getenv("VIDEO_CODEC_MODE", "mp4").strip().lower()
     telegram_api_base_url: str = os.getenv("TELEGRAM_API_BASE_URL", "")
