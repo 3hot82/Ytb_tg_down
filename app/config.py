@@ -43,6 +43,8 @@ class Settings:
     youtube_multi_audio: bool = _bool("YOUTUBE_MULTI_AUDIO", False)
     youtube_audio_language: str = os.getenv("YOUTUBE_AUDIO_LANGUAGE", "").strip().lower()
     youtube_player_client: str = os.getenv("YOUTUBE_PLAYER_CLIENT", "web_embedded").strip().lower()
+    youtube_sponsorblock_caption: bool = _bool("YOUTUBE_SPONSORBLOCK_CAPTION", False)
+    youtube_sponsorblock_categories: str = os.getenv("YOUTUBE_SPONSORBLOCK_CATEGORIES", "sponsor,selfpromo,interaction").strip().lower()
     telegram_api_base_url: str = os.getenv("TELEGRAM_API_BASE_URL", "")
     telegram_api_file_url: str = os.getenv("TELEGRAM_API_FILE_URL", "")
     telegram_request_timeout_seconds: int = _int("TELEGRAM_REQUEST_TIMEOUT_SECONDS", 600)

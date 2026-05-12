@@ -11,7 +11,8 @@ import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal
-from urllib.parse import urlparse
+from urllib.parse import urlencode, urlparse
+from urllib.request import urlopen
 
 from typing import Callable
 
@@ -296,14 +297,77 @@ def _chapters_text(chapters: list[dict] | None) -> str | None:
     return "\n".join(lines) if lines else None
 
 
+
+_SPONSORBLOCK_CATEGORY_LABELS = {
+    "sponsor": "спонсорская вставка",
+    "selfpromo": "самореклама",
+    "interaction": "лайк/подписка",
+    "intro": "интро",
+    "outro": "аутро",
+    "preview": "превью",
+    "music_offtopic": "не по теме",
+    "filler": "филлер",
+}
+
+
+def _sponsorblock_categories() -> list[str]:
+    return [part.strip() for part in settings.youtube_sponsorblock_categories.split(",") if part.strip()]
+
+
+def _sponsorblock_segments(video_id: str | None) -> list[dict[str, Any]]:
+    if not settings.youtube_sponsorblock_caption or not video_id:
+        return []
+    categories = _sponsorblock_categories()
+    if not categories:
+        return []
+    query = urlencode({"videoID": video_id, "categories": json.dumps(categories)})
+    url = f"https://sponsor.ajay.app/api/skipSegments?{query}"
+    try:
+        with urlopen(url, timeout=10) as response:
+            if response.status == 404:
+                return []
+            if response.status != 200:
+                log.warning("SponsorBlock returned status=%s for video=%s", response.status, video_id)
+                return []
+            data = json.loads(response.read().decode("utf-8"))
+    except Exception as exc:  # noqa: BLE001 - SponsorBlock is optional metadata
+        log.warning("SponsorBlock lookup failed for video=%s: %s", video_id, exc)
+        return []
+    if not isinstance(data, list):
+        return []
+    return [seg for seg in data if isinstance(seg, dict) and isinstance(seg.get("segment"), list) and len(seg["segment"]) >= 2]
+
+
+def _sponsorblock_text(info: dict[str, Any]) -> str | None:
+    segments = _sponsorblock_segments(str(info.get("id") or "") or None)
+    if not segments:
+        return None
+    lines = ["Пропуск рекламы:"]
+    for seg in sorted(segments, key=lambda item: float(item.get("segment", [0])[0] or 0))[:12]:
+        start, end = seg["segment"][:2]
+        category = str(seg.get("category") or "")
+        label = _SPONSORBLOCK_CATEGORY_LABELS.get(category, category or "segment")
+        # Telegram распознаёт отдельные таймкоды в подписи к видео.
+        # Главный таймкод — конец сегмента: тап по нему переносит сразу после рекламы.
+        lines.append(f"⏭ {_fmt_time(float(end))} — после: {label} (с {_fmt_time(float(start))})")
+    return "\n".join(lines)
+
+
 def _caption_from_info(info: dict[str, Any]) -> str | None:
     caption = _clean_caption(str(info.get("title") or info.get("description") or ""))
+    parts = [caption] if caption else []
     chapters = info.get("chapters")
-    if chapters and caption:
+    if chapters:
         ch_text = _chapters_text(chapters)
         if ch_text:
-            caption += "\n\n" + ch_text
-    return caption
+            parts.append(ch_text)
+    sb_text = _sponsorblock_text(info)
+    if sb_text:
+        parts.append(sb_text)
+    result = "\n\n".join(parts) if parts else None
+    if result and len(result) > 1024:
+        result = result[:1021].rstrip() + "…"
+    return result
 
 
 def _host_platform(url: str) -> str | None:
