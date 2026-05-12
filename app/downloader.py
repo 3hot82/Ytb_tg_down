@@ -72,6 +72,7 @@ def _base_opts(workdir: Path) -> dict[str, Any]:
         "socket_timeout": 30,
         "retries": 3,
         "fragment_retries": 3,
+        "concurrent_fragment_downloads": 8,
         "outtmpl": str(workdir / "%(id)s.%(ext)s"),
         "paths": {"home": str(workdir)},
         "overwrites": True,
