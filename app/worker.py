@@ -113,20 +113,33 @@ def _make_video_thumbnail(video_path: Path) -> Path | None:
 
 
 
+def _media_cache_key(url: str) -> str:
+    audio_part = "default"
+    if settings.youtube_multi_audio and settings.youtube_audio_language:
+        audio_part = f"lang:{settings.youtube_audio_language}"
+    return f"{MEDIA_CACHE_PREFIX}{settings.video_codec_mode}:{audio_part}:{url}"
+
+
+def _legacy_media_cache_key(url: str) -> str:
+    return f"{MEDIA_CACHE_PREFIX}{url}"
+
+
 async def _try_send_cached(redis: Redis, bot: Bot, job: MediaJob) -> bool:
+    cache_key = _media_cache_key(job.url)
+    legacy_key = _legacy_media_cache_key(job.url)
     if job.force_download:
-        await redis.delete(f"{MEDIA_CACHE_PREFIX}{job.url}")
+        await redis.delete(cache_key, legacy_key)
         log.info("job %s bypassed and cleared telegram file_id cache url=%s", job.id, job.url)
         return False
-    raw = await redis.get(f"{MEDIA_CACHE_PREFIX}{job.url}")
+    raw = await redis.get(cache_key)
     if not raw:
         return False
     media_type, file_id, caption = (raw.split("\t", 2) + [None, None, None])[:3]
     if media_type not in {"photo", "video", "document"}:
-        await redis.delete(f"{MEDIA_CACHE_PREFIX}{job.url}")
+        await redis.delete(cache_key)
         return False
     if not file_id:
-        await redis.delete(f"{MEDIA_CACHE_PREFIX}{job.url}")
+        await redis.delete(cache_key)
         return False
     try:
         if media_type == "photo":
@@ -138,7 +151,7 @@ async def _try_send_cached(redis: Redis, bot: Bot, job: MediaJob) -> bool:
         log.info("job %s sent from telegram file_id cache url=%s type=%s", job.id, job.url, media_type)
         return True
     except TelegramBadRequest as exc:
-        await redis.delete(f"{MEDIA_CACHE_PREFIX}{job.url}")
+        await redis.delete(cache_key)
         log.warning("telegram file_id cache failed for %s, invalidating: %s", job.url, exc)
         return False
 
@@ -170,7 +183,7 @@ async def _cache_sent_message(
         return
     safe_caption = (caption or "").replace("\t", " ").replace("\n", " ")
     await redis.set(
-        f"{MEDIA_CACHE_PREFIX}{job.url}",
+        _media_cache_key(job.url),
         f"{media_type}\t{file_id}\t{safe_caption}",
         ex=settings.media_cache_ttl_seconds,
     )

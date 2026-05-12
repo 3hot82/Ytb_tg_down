@@ -135,10 +135,36 @@ def _is_video_only_codec(fmt: dict[str, Any], codec_mode: str) -> bool:
     return False
 
 
+def _youtube_extractor_args() -> dict[str, dict[str, list[str]]]:
+    if settings.youtube_multi_audio and settings.youtube_player_client:
+        return {"youtube": {"player_client": [settings.youtube_player_client]}}
+    return {}
+
+
+def _language_audio_selectors(base_selector: str, *, ext: str | None = None, acodec: str | None = None) -> str:
+    lang = settings.youtube_audio_language
+    if not settings.youtube_multi_audio or not lang:
+        return base_selector
+    filters = [f"language^={lang}"]
+    if ext:
+        filters.append(f"ext={ext}")
+    if acodec:
+        filters.append(acodec)
+    preferred = "bestaudio" + "".join(f"[{flt}]" for flt in filters)
+    loose = f"bestaudio[language^={lang}]"
+    return f"{preferred}/{loose}/{base_selector}"
+
+
 def _audio_format_for_codec(codec_mode: str) -> str:
     if codec_mode in {"vp9", "av9"}:
-        return "bestaudio[ext=webm][acodec=opus]/bestaudio[acodec=opus]/bestaudio"
-    return "bestaudio[ext=m4a][acodec^=mp4a]/bestaudio[acodec^=mp4a]/bestaudio"
+        base = "bestaudio[ext=webm][acodec=opus]/bestaudio[acodec=opus]/bestaudio"
+        return _language_audio_selectors(base, ext="webm", acodec="acodec=opus")
+    base = "bestaudio[ext=m4a][acodec^=mp4a]/bestaudio[acodec^=mp4a]/bestaudio"
+    return _language_audio_selectors(base, ext="m4a", acodec="acodec^=mp4a")
+
+
+def _video_with_audio_selector(video_selector: str, codec_mode: str) -> str:
+    return "/".join(f"{video_selector}+{audio}" for audio in _audio_format_for_codec(codec_mode).split("/"))
 
 
 def _merge_output_format_for_mode(codec_mode: str) -> str:
@@ -156,9 +182,20 @@ def _is_supported_video_file(path: Path, codec_mode: str) -> bool:
 
 def _fallback_selector_for_mode(codec_mode: str) -> str:
     if codec_mode == "av1":
-        return "bestvideo[ext=mp4][vcodec^=av01][height<=480]+bestaudio[ext=m4a]/bestvideo[ext=mp4][vcodec^=av01][height<=360]+bestaudio[ext=m4a]"
+        return "/".join([
+            _video_with_audio_selector("bestvideo[ext=mp4][vcodec^=av01][height<=480]", codec_mode),
+            _video_with_audio_selector("bestvideo[ext=mp4][vcodec^=av01][height<=360]", codec_mode),
+        ])
     if codec_mode in {"vp9", "av9"}:
-        return "bestvideo[ext=webm][vcodec=vp9][height<=480]+bestaudio[ext=webm]/bestvideo[ext=webm][vcodec=vp9][height<=360]+bestaudio[ext=webm]"
+        return "/".join([
+            _video_with_audio_selector("bestvideo[ext=webm][vcodec=vp9][height<=480]", codec_mode),
+            _video_with_audio_selector("bestvideo[ext=webm][vcodec=vp9][height<=360]", codec_mode),
+        ])
+    if settings.youtube_multi_audio and settings.youtube_audio_language:
+        return "/".join([
+            _video_with_audio_selector("bestvideo[ext=mp4][vcodec^=avc1][height<=480]", codec_mode),
+            _video_with_audio_selector("bestvideo[ext=mp4][vcodec^=avc1][height<=360]", codec_mode),
+        ])
     return "best[ext=mp4][vcodec^=avc1][acodec^=mp4a][height<=480]/best[ext=mp4][vcodec^=avc1][acodec^=mp4a][height<=360]/best[ext=mp4][vcodec^=avc1][acodec^=mp4a]"
 
 
@@ -184,10 +221,36 @@ def _select_safe_telegram_format(info: dict[str, Any], max_bytes: int) -> tuple[
                 size = _format_size_bytes(fmt, duration_f)
                 total_size = (size or 0) + audio_size if size else None
                 if total_size is None or total_size <= max_bytes:
-                    selector = f"{fmt.get('format_id')}+{_audio_format_for_codec(mode)}"
+                    selector = _video_with_audio_selector(str(fmt.get("format_id")), mode)
                     log.info("selected safe yt-dlp format id=%s mode=%s height=%s estimated_size=%s max=%s", fmt.get("format_id"), mode, fmt.get("height"), total_size, max_bytes)
                     return selector, True, mode
         raise DownloadRejected(f"Даже 360p в режиме {mode} по оценке больше {settings.max_file_mb} MB.")
+
+
+    if settings.youtube_multi_audio and settings.youtube_audio_language:
+        video_candidates = [
+            f for f in info.get("formats") or []
+            if f.get("ext") == "mp4" and str(f.get("vcodec") or "").startswith("avc1") and f.get("acodec") == "none"
+        ]
+        audio_candidates = [f for f in info.get("formats") or [] if f.get("acodec") != "none" and f.get("vcodec") == "none"]
+        audio_size = min((_format_size_bytes(f, duration_f) or 0 for f in audio_candidates), default=0)
+        for max_height in (480, 360):
+            matching = [f for f in video_candidates if 0 < _format_height(f) <= max_height]
+            for fmt in sorted(matching, key=_format_height, reverse=True):
+                size = _format_size_bytes(fmt, duration_f)
+                total_size = (size or 0) + audio_size if size else None
+                if total_size is None or total_size <= max_bytes:
+                    selector = _video_with_audio_selector(str(fmt.get("format_id")), "mp4")
+                    log.info(
+                        "selected safe yt-dlp format id=%s mode=mp4 audio_language=%s height=%s estimated_size=%s max=%s",
+                        fmt.get("format_id"),
+                        settings.youtube_audio_language,
+                        fmt.get("height"),
+                        total_size,
+                        max_bytes,
+                    )
+                    return selector, True, "mp4"
+        log.warning("no safe h264 video-only format for requested YouTube audio language; falling back to premerged mp4")
 
     candidates = [f for f in info.get("formats") or [] if _is_premerged_h264_aac(f)]
     if not candidates:
@@ -387,6 +450,7 @@ def _download_ytdlp_video(url: str, workdir: Path, fmt: str, *, merge: bool = Fa
             "format_sort": ["res", "+br", "+size", "+fps", "vcodec:h264", "acodec:aac"],
             "max_filesize": settings.max_file_bytes,
             "remote_components": ["ejs:github"],
+            "extractor_args": _youtube_extractor_args(),
             "writethumbnail": True,
             "convertthumbnails": "jpg",
             "embedsubs": False,
@@ -666,7 +730,7 @@ def _download_with_fallbacks(url: str, job_id: str, max_duration_seconds: int | 
     platform = _host_platform(url)
     if platform == "youtube":
         opts = _ytdlp_opts_for_url(url, workdir)
-        opts.update({"quiet": True, "remote_components": ["ejs:github"]})
+        opts.update({"quiet": True, "remote_components": ["ejs:github"], "extractor_args": _youtube_extractor_args()})
         with YoutubeDL(opts) as ydl:
             preflight_info = ydl.extract_info(url, download=False)
         _validate_info(preflight_info, max_duration_seconds=max_duration_seconds)
