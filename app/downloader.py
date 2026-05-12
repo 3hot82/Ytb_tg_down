@@ -400,7 +400,6 @@ def _download_ytdlp_video(url: str, workdir: Path, fmt: str, *, merge: bool = Fa
             {
                 "merge_output_format": _merge_output_format_for_mode(codec_mode),
                 "postprocessors": [
-                    {"key": "FFmpegMerger"},
                     {"key": "FFmpegThumbnailsConvertor", "format": "jpg", "when": "before_dl"},
                     {"key": "FFmpegMetadata"},
                 ],
