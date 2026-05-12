@@ -102,6 +102,51 @@ def _filesize_ok(path: Path) -> bool:
     return path.exists() and path.stat().st_size <= settings.max_file_bytes
 
 
+def _format_height(fmt: dict[str, Any]) -> int:
+    return int(fmt.get("height") or 0)
+
+
+def _format_size_bytes(fmt: dict[str, Any], duration: float | None = None) -> int | None:
+    size = fmt.get("filesize") or fmt.get("filesize_approx")
+    if size:
+        return int(size)
+    tbr = fmt.get("tbr")
+    if tbr and duration:
+        # tbr is KBit/s; add 10% container/metadata safety margin.
+        return int(float(tbr) * 1000 / 8 * float(duration) * 1.10)
+    return None
+
+
+def _is_telegram_format(fmt: dict[str, Any]) -> bool:
+    vcodec = str(fmt.get("vcodec") or "")
+    acodec = str(fmt.get("acodec") or "")
+    return fmt.get("ext") == "mp4" and vcodec.startswith("avc1") and acodec.startswith("mp4a")
+
+
+def _select_safe_telegram_format(info: dict[str, Any], max_bytes: int) -> str:
+    duration = info.get("duration")
+    duration_f = float(duration) if duration else None
+    candidates = [f for f in info.get("formats") or [] if _is_telegram_format(f)]
+    if not candidates:
+        return "best[ext=mp4][vcodec^=avc1][acodec^=mp4a][height<=480]/best[ext=mp4][vcodec^=avc1][acodec^=mp4a][height<=360]/best[ext=mp4][vcodec^=avc1][acodec^=mp4a]"
+
+    for max_height in (480, 360):
+        matching = [f for f in candidates if 0 < _format_height(f) <= max_height]
+        for fmt in sorted(matching, key=_format_height, reverse=True):
+            size = _format_size_bytes(fmt, duration_f)
+            if size is None or size <= max_bytes:
+                log.info(
+                    "selected safe yt-dlp format id=%s height=%s estimated_size=%s max=%s",
+                    fmt.get("format_id"),
+                    fmt.get("height"),
+                    size,
+                    max_bytes,
+                )
+                return str(fmt.get("format_id"))
+
+    raise DownloadRejected(f"Даже 360p по оценке больше {settings.max_file_mb} MB.")
+
+
 def _clean_caption(text: str) -> str | None:
     text = html.unescape(text).strip()
     if not text or text.lower() in {"none", "untitled"}:
@@ -276,7 +321,7 @@ def _ytdlp_opts_for_url(url: str, workdir: Path) -> dict[str, Any]:
     return opts
 
 
-def _download_ytdlp_video(url: str, workdir: Path, fmt: str, *, merge: bool = False, max_duration_seconds: int | None = None, progress_hook: Callable[[dict[str, Any]], None] | None = None) -> tuple[Path, dict[str, Any], Path | None]:
+def _download_ytdlp_video(url: str, workdir: Path, fmt: str, *, merge: bool = False, max_duration_seconds: int | None = None, progress_hook: Callable[[dict[str, Any]], None] | None = None, preflight_info: dict[str, Any] | None = None) -> tuple[Path, dict[str, Any], Path | None]:
     _check_ytdlp_bin()
     opts = _ytdlp_opts_for_url(url, workdir)
     opts.update(
@@ -306,7 +351,7 @@ def _download_ytdlp_video(url: str, workdir: Path, fmt: str, *, merge: bool = Fa
             }
         )
     with YoutubeDL(opts) as ydl:
-        info = ydl.extract_info(url, download=False)
+        info = preflight_info or ydl.extract_info(url, download=False)
         _validate_info(info, max_duration_seconds=max_duration_seconds)
         ydl.download([url])
     found = _find_file(workdir, {".mp4"}) or _find_file(workdir, {".webm"})
@@ -560,15 +605,24 @@ def _download_with_fallbacks(url: str, job_id: str, max_duration_seconds: int | 
     if workdir.exists():
         shutil.rmtree(workdir)
     workdir.mkdir(parents=True)
-    formats = [
-        ("best[ext=mp4][vcodec^=avc1][acodec^=mp4a][height<=480]/best[ext=mp4][vcodec^=avc1][acodec^=mp4a][height<=720]/best[ext=mp4][vcodec^=avc1][acodec^=mp4a]", False),
-        ("worst[ext=mp4][vcodec!=none][acodec!=none]/best[ext=mp4][vcodec!=none][acodec!=none][height<=480]/best[ext=mp4][vcodec!=none][acodec!=none]", False),
-        ("worstvideo[ext=mp4][vcodec^=avc1][height<=480]+worstaudio[ext=m4a]/bestvideo[ext=mp4][vcodec^=avc1][height<=480]+bestaudio[ext=m4a]/bestvideo[ext=mp4][vcodec^=avc1]+bestaudio[ext=m4a]", True),
-        ("best[ext=webm][vcodec^=vp9][height<=1080]/best[ext=webm][vcodec^=av1][height<=1080]/best[ext=webm]", True),
-        ("worst[ext=mp4]/best[ext=mp4][height<=480]/best[ext=mp4]/best", False),
-    ]
+    formats: list[tuple[str, bool, dict[str, Any] | None]] = []
     last_error: Exception | None = None
     platform = _host_platform(url)
+    if platform == "youtube":
+        opts = _ytdlp_opts_for_url(url, workdir)
+        opts.update({"quiet": True, "remote_components": ["ejs:github"]})
+        with YoutubeDL(opts) as ydl:
+            preflight_info = ydl.extract_info(url, download=False)
+        _validate_info(preflight_info, max_duration_seconds=max_duration_seconds)
+        formats.append((_select_safe_telegram_format(preflight_info, settings.max_file_bytes), False, preflight_info))
+    else:
+        formats.extend([
+            ("best[ext=mp4][vcodec^=avc1][acodec^=mp4a][height<=480]/best[ext=mp4][vcodec^=avc1][acodec^=mp4a][height<=360]/best[ext=mp4][vcodec^=avc1][acodec^=mp4a]", False, None),
+            ("worst[ext=mp4][vcodec!=none][acodec!=none]/best[ext=mp4][vcodec!=none][acodec!=none][height<=480]/best[ext=mp4][vcodec!=none][acodec!=none]", False, None),
+            ("worstvideo[ext=mp4][vcodec^=avc1][height<=480]+worstaudio[ext=m4a]/bestvideo[ext=mp4][vcodec^=avc1][height<=480]+bestaudio[ext=m4a]/bestvideo[ext=mp4][vcodec^=avc1]+bestaudio[ext=m4a]", True, None),
+            ("best[ext=webm][vcodec^=vp9][height<=1080]/best[ext=webm][vcodec^=av1][height<=1080]/best[ext=webm]", True, None),
+            ("worst[ext=mp4]/best[ext=mp4][height<=480]/best[ext=mp4]/best", False, None),
+        ])
     prefer_gallery = platform == "instagram" and any(marker in url for marker in ("/p/", "/reel/", "/reels/", "/stories/"))
     try:
         if prefer_gallery:
@@ -578,10 +632,10 @@ def _download_with_fallbacks(url: str, job_id: str, max_duration_seconds: int | 
                 last_error = exc
                 log.info("gallery-dl first attempt failed for %s: %s", job_id, exc)
 
-        for fmt, merge in formats:
+        for fmt, merge, preflight_info in formats:
             _clear_workdir(workdir)
             try:
-                path, info, thumbnail_path = _download_ytdlp_video(url, workdir, fmt, merge=merge, max_duration_seconds=max_duration_seconds, progress_hook=progress_hook)
+                path, info, thumbnail_path = _download_ytdlp_video(url, workdir, fmt, merge=merge, max_duration_seconds=max_duration_seconds, progress_hook=progress_hook, preflight_info=preflight_info)
                 if path.suffix.lower() != ".mp4":
                     raise DownloadFailed("Получился не MP4 файл.")
                 if not _is_telegram_mp4(path):
