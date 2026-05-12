@@ -118,32 +118,68 @@ def _format_size_bytes(fmt: dict[str, Any], duration: float | None = None) -> in
     return None
 
 
-def _is_telegram_format(fmt: dict[str, Any]) -> bool:
+def _is_premerged_h264_aac(fmt: dict[str, Any]) -> bool:
     vcodec = str(fmt.get("vcodec") or "")
     acodec = str(fmt.get("acodec") or "")
     return fmt.get("ext") == "mp4" and vcodec.startswith("avc1") and acodec.startswith("mp4a")
 
 
-def _select_safe_telegram_format(info: dict[str, Any], max_bytes: int) -> str:
+def _is_video_only_codec(fmt: dict[str, Any], codec_mode: str) -> bool:
+    vcodec = str(fmt.get("vcodec") or "")
+    if fmt.get("acodec") != "none":
+        return False
+    if codec_mode == "av1":
+        return fmt.get("ext") == "mp4" and vcodec.startswith("av01")
+    if codec_mode in {"vp9", "av9"}:
+        return fmt.get("ext") == "webm" and vcodec == "vp9"
+    return False
+
+
+def _audio_format_for_codec(codec_mode: str) -> str:
+    if codec_mode in {"vp9", "av9"}:
+        return "bestaudio[ext=webm][acodec=opus]/bestaudio[acodec=opus]/bestaudio"
+    return "bestaudio[ext=m4a][acodec^=mp4a]/bestaudio[acodec^=mp4a]/bestaudio"
+
+
+def _fallback_selector_for_mode(codec_mode: str) -> str:
+    if codec_mode == "av1":
+        return "bestvideo[ext=mp4][vcodec^=av01][height<=480]+bestaudio[ext=m4a]/bestvideo[ext=mp4][vcodec^=av01][height<=360]+bestaudio[ext=m4a]"
+    if codec_mode in {"vp9", "av9"}:
+        return "bestvideo[ext=webm][vcodec=vp9][height<=480]+bestaudio[ext=webm]/bestvideo[ext=webm][vcodec=vp9][height<=360]+bestaudio[ext=webm]"
+    return "best[ext=mp4][vcodec^=avc1][acodec^=mp4a][height<=480]/best[ext=mp4][vcodec^=avc1][acodec^=mp4a][height<=360]/best[ext=mp4][vcodec^=avc1][acodec^=mp4a]"
+
+
+def _select_safe_telegram_format(info: dict[str, Any], max_bytes: int) -> tuple[str, bool]:
     duration = info.get("duration")
     duration_f = float(duration) if duration else None
-    candidates = [f for f in info.get("formats") or [] if _is_telegram_format(f)]
+    mode = settings.video_codec_mode if settings.video_codec_mode in {"mp4", "av1", "vp9", "av9", "auto"} else "mp4"
+
+    if mode in {"av1", "vp9", "av9"}:
+        video_candidates = [f for f in info.get("formats") or [] if _is_video_only_codec(f, mode)]
+        audio_candidates = [f for f in info.get("formats") or [] if f.get("acodec") != "none" and f.get("vcodec") == "none"]
+        audio_size = min((_format_size_bytes(f, duration_f) or 0 for f in audio_candidates), default=0)
+        for max_height in (480, 360):
+            matching = [f for f in video_candidates if 0 < _format_height(f) <= max_height]
+            for fmt in sorted(matching, key=_format_height, reverse=True):
+                size = _format_size_bytes(fmt, duration_f)
+                total_size = (size or 0) + audio_size if size else None
+                if total_size is None or total_size <= max_bytes:
+                    selector = f"{fmt.get('format_id')}+{_audio_format_for_codec(mode)}"
+                    log.info("selected safe yt-dlp format id=%s mode=%s height=%s estimated_size=%s max=%s", fmt.get("format_id"), mode, fmt.get("height"), total_size, max_bytes)
+                    return selector, True
+        raise DownloadRejected(f"Даже 360p в режиме {mode} по оценке больше {settings.max_file_mb} MB.")
+
+    candidates = [f for f in info.get("formats") or [] if _is_premerged_h264_aac(f)]
     if not candidates:
-        return "best[ext=mp4][vcodec^=avc1][acodec^=mp4a][height<=480]/best[ext=mp4][vcodec^=avc1][acodec^=mp4a][height<=360]/best[ext=mp4][vcodec^=avc1][acodec^=mp4a]"
+        return _fallback_selector_for_mode("mp4"), False
 
     for max_height in (480, 360):
         matching = [f for f in candidates if 0 < _format_height(f) <= max_height]
         for fmt in sorted(matching, key=_format_height, reverse=True):
             size = _format_size_bytes(fmt, duration_f)
             if size is None or size <= max_bytes:
-                log.info(
-                    "selected safe yt-dlp format id=%s height=%s estimated_size=%s max=%s",
-                    fmt.get("format_id"),
-                    fmt.get("height"),
-                    size,
-                    max_bytes,
-                )
-                return str(fmt.get("format_id"))
+                log.info("selected safe yt-dlp format id=%s mode=mp4 height=%s estimated_size=%s max=%s", fmt.get("format_id"), fmt.get("height"), size, max_bytes)
+                return str(fmt.get("format_id")), False
 
     raise DownloadRejected(f"Даже 360p по оценке больше {settings.max_file_mb} MB.")
 
@@ -615,7 +651,8 @@ def _download_with_fallbacks(url: str, job_id: str, max_duration_seconds: int | 
         with YoutubeDL(opts) as ydl:
             preflight_info = ydl.extract_info(url, download=False)
         _validate_info(preflight_info, max_duration_seconds=max_duration_seconds)
-        formats.append((_select_safe_telegram_format(preflight_info, settings.max_file_bytes), False, preflight_info))
+        selected_fmt, selected_merge = _select_safe_telegram_format(preflight_info, settings.max_file_bytes)
+        formats.append((selected_fmt, selected_merge, preflight_info))
     else:
         formats.extend([
             ("best[ext=mp4][vcodec^=avc1][acodec^=mp4a][height<=480]/best[ext=mp4][vcodec^=avc1][acodec^=mp4a][height<=360]/best[ext=mp4][vcodec^=avc1][acodec^=mp4a]", False, None),

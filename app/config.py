@@ -38,6 +38,7 @@ class Settings:
     redis_url: str = os.getenv("REDIS_URL", "redis://redis:6379/0")
     queue_name: str = os.getenv("QUEUE_NAME", "media_jobs")
     max_file_mb: int = _int("MAX_FILE_MB", 50)
+    video_codec_mode: str = os.getenv("VIDEO_CODEC_MODE", "mp4").strip().lower()
     telegram_api_base_url: str = os.getenv("TELEGRAM_API_BASE_URL", "")
     telegram_api_file_url: str = os.getenv("TELEGRAM_API_FILE_URL", "")
     telegram_request_timeout_seconds: int = _int("TELEGRAM_REQUEST_TIMEOUT_SECONDS", 600)
