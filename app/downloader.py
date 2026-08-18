@@ -678,7 +678,18 @@ def _ytdlp_opts_for_url(url: str, workdir: Path) -> dict[str, Any]:
     return opts
 
 
-def _download_ytdlp_video(url: str, workdir: Path, fmt: str, *, merge: bool = False, codec_mode: str = "mp4", max_duration_seconds: int | None = None, progress_hook: Callable[[dict[str, Any]], None] | None = None, preflight_info: dict[str, Any] | None = None) -> tuple[Path, dict[str, Any], Path | None]:
+def _download_ytdlp_video(
+    url: str,
+    workdir: Path,
+    fmt: str,
+    *,
+    merge: bool = False,
+    codec_mode: str = "mp4",
+    max_duration_seconds: int | None = None,
+    progress_hook: Callable[[dict[str, Any]], None] | None = None,
+    preflight_info: dict[str, Any] | None = None,
+    client_override: list[str] | None = None,
+) -> tuple[Path, dict[str, Any], Path | None]:
     _check_ytdlp_bin()
     opts = _ytdlp_opts_for_url(url, workdir)
     opts.update(
@@ -687,7 +698,7 @@ def _download_ytdlp_video(url: str, workdir: Path, fmt: str, *, merge: bool = Fa
             "format_sort": ["res", "+br", "+size", "+fps", "vcodec:h264", "acodec:aac"],
             "max_filesize": settings.max_file_bytes,
             "remote_components": ["ejs:github"],
-            "extractor_args": _youtube_extractor_args(),
+            "extractor_args": _youtube_extractor_args(client_override=client_override),
             "writethumbnail": True,
             "convertthumbnails": "jpg",
             "embedsubs": False,
