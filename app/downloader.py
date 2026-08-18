@@ -144,10 +144,12 @@ def _is_video_only_codec(fmt: dict[str, Any], codec_mode: str) -> bool:
     return False
 
 
-def _youtube_extractor_args() -> dict[str, dict[str, list[str]]]:
+def _youtube_extractor_args(client_override: list[str] | None = None) -> dict[str, dict[str, list[str]]]:
     ea: dict[str, dict[str, list[str]]] = {}
     youtube_args: dict[str, list[str]] = {}
-    if settings.youtube_multi_audio and settings.youtube_player_client:
+    if client_override:
+        youtube_args["player_client"] = client_override
+    elif settings.youtube_multi_audio and settings.youtube_player_client:
         youtube_args["player_client"] = [settings.youtube_player_client]
     if settings.youtube_multi_audio and settings.youtube_audio_language:
         # Ask YouTube for metadata in the same language as the selected audio track.
@@ -891,13 +893,14 @@ def _extract_frame_cover(video_path: Path, job_id: str) -> Path | None:
         log.warning("failed to extract frame cover for %s: %s", job_id, exc)
     return None
 
+
 def _move_final(path: Path, job_id: str) -> Path:
     final = DOWNLOAD_DIR / f"{job_id}{path.suffix.lower()}"
     shutil.move(str(path), final)
     return final
 
 
-def _move_gallery_finals(paths: list[Path], job_id: str) -> list[Path]:
+def _move_gallery_finals_impl(paths: list[Path], job_id: str) -> list[Path]:
     finals: list[Path] = []
     for index, path in enumerate(paths, start=1):
         if path.suffix.lower() in VIDEO_EXTS:
@@ -917,19 +920,13 @@ def _media_type(path: Path) -> Literal["photo", "video", "document"]:
     return "document"
 
 
-def _clear_workdir(workdir: Path) -> None:
-    for child in workdir.rglob("*"):
-        if child.is_file():
-            child.unlink(missing_ok=True)
-
-
 def _try_gallery_dl(url: str, workdir: Path, job_id: str) -> DownloadResult:
     _clear_workdir(workdir)
     _, info = _download_gallery_dl(url, workdir)
     media_files = _find_gallery_media_files(workdir)
     if not media_files:
         raise DownloadFailed("gallery-dl не создал медиа-файл.")
-    finals = _move_gallery_finals(media_files, job_id)
+    finals = _move_gallery_finals_impl(media_files, job_id)
     caption = _caption_from_info(info)
     items = tuple(
         DownloadItem(path=final, media_type=_media_type(final), caption=caption if index == 0 else None)
@@ -964,25 +961,50 @@ def _download_with_fallbacks(url: str, job_id: str, max_duration_seconds: int | 
     if workdir.exists():
         shutil.rmtree(workdir)
     workdir.mkdir(parents=True)
-    formats: list[tuple[str, bool, str, dict[str, Any] | None]] = []
+    formats: list[tuple[str, bool, str, dict[str, Any] | None, list[str] | None]] = []
     last_error: Exception | None = None
     platform = _host_platform(url)
+
     if platform == "youtube":
-        opts = _ytdlp_opts_for_url(url, workdir)
-        opts.update({"quiet": True, "remote_components": ["ejs:github"], "extractor_args": _youtube_extractor_args()})
-        with YoutubeDL(opts) as ydl:
-            preflight_info = ydl.extract_info(url, download=False)
+        client_candidates = [None, ["ios"], ["android"], ["mweb", "tv_embedded"]]
+        preflight_info = None
+        used_client = None
+        for candidate in client_candidates:
+            try:
+                opts = _ytdlp_opts_for_url(url, workdir)
+                opts.update({
+                    "quiet": True,
+                    "remote_components": ["ejs:github"],
+                    "extractor_args": _youtube_extractor_args(client_override=candidate),
+                })
+                with YoutubeDL(opts) as ydl:
+                    preflight_info = ydl.extract_info(url, download=False)
+                if preflight_info:
+                    used_client = candidate
+                    break
+            except Exception as exc:
+                log.info("preflight extract with client %s failed for %s: %s", candidate, job_id, exc)
+                last_error = exc
+
+        if not preflight_info:
+            raise last_error or DownloadFailed("Не удалось получить информацию о видео.")
+
         _validate_info(preflight_info, max_duration_seconds=max_duration_seconds)
         selected_fmt, selected_merge, selected_mode = _select_safe_telegram_format(preflight_info, settings.max_file_bytes)
-        formats.append((selected_fmt, selected_merge, selected_mode, preflight_info))
+        formats.append((selected_fmt, selected_merge, selected_mode, preflight_info, used_client))
+        if used_client != ["ios"]:
+            formats.append((selected_fmt, selected_merge, selected_mode, None, ["ios"]))
+        if used_client != ["android"]:
+            formats.append((selected_fmt, selected_merge, selected_mode, None, ["android"]))
     else:
         formats.extend([
-            ("best[ext=mp4][vcodec^=avc1][acodec^=mp4a][height<=480]/best[ext=mp4][vcodec^=avc1][acodec^=mp4a][height<=360]/best[ext=mp4][vcodec^=avc1][acodec^=mp4a]", False, "mp4", None),
-            ("worst[ext=mp4][vcodec!=none][acodec!=none]/best[ext=mp4][vcodec!=none][acodec!=none][height<=480]/best[ext=mp4][vcodec!=none][acodec!=none]", False, "mp4", None),
-            ("worstvideo[ext=mp4][vcodec^=avc1][height<=480]+worstaudio[ext=m4a]/bestvideo[ext=mp4][vcodec^=avc1][height<=480]+bestaudio[ext=m4a]/bestvideo[ext=mp4][vcodec^=avc1]+bestaudio[ext=m4a]", True, "mp4", None),
-            ("best[ext=webm][vcodec^=vp9][height<=1080]/best[ext=webm][vcodec^=av1][height<=1080]/best[ext=webm]", True, "mp4", None),
-            ("worst[ext=mp4]/best[ext=mp4][height<=480]/best[ext=mp4]/best", False, "mp4", None),
+            ("best[ext=mp4][vcodec^=avc1][acodec^=mp4a][height<=480]/best[ext=mp4][vcodec^=avc1][acodec^=mp4a][height<=360]/best[ext=mp4][vcodec^=avc1][acodec^=mp4a]", False, "mp4", None, None),
+            ("worst[ext=mp4][vcodec!=none][acodec!=none]/best[ext=mp4][vcodec!=none][acodec!=none][height<=480]/best[ext=mp4][vcodec!=none][acodec!=none]", False, "mp4", None, None),
+            ("worstvideo[ext=mp4][vcodec^=avc1][height<=480]+worstaudio[ext=m4a]/bestvideo[ext=mp4][vcodec^=avc1][height<=480]+bestaudio[ext=m4a]/bestvideo[ext=mp4][vcodec^=avc1]+bestaudio[ext=m4a]", True, "mp4", None, None),
+            ("best[ext=webm][vcodec^=vp9][height<=1080]/best[ext=webm][vcodec^=av1][height<=1080]/best[ext=webm]", True, "mp4", None, None),
+            ("worst[ext=mp4]/best[ext=mp4][height<=480]/best[ext=mp4]/best", False, "mp4", None, None),
         ])
+
     prefer_gallery = platform == "instagram" and any(marker in url for marker in ("/p/", "/reel/", "/reels/", "/stories/"))
     try:
         if prefer_gallery:
@@ -992,10 +1014,20 @@ def _download_with_fallbacks(url: str, job_id: str, max_duration_seconds: int | 
                 last_error = exc
                 log.info("gallery-dl first attempt failed for %s: %s", job_id, exc)
 
-        for fmt, merge, codec_mode, preflight_info in formats:
+        for fmt, merge, codec_mode, preflight_info, client_override in formats:
             _clear_workdir(workdir)
             try:
-                path, info, thumbnail_path = _download_ytdlp_video(url, workdir, fmt, merge=merge, codec_mode=codec_mode, max_duration_seconds=max_duration_seconds, progress_hook=progress_hook, preflight_info=preflight_info)
+                path, info, thumbnail_path = _download_ytdlp_video(
+                    url,
+                    workdir,
+                    fmt,
+                    merge=merge,
+                    codec_mode=codec_mode,
+                    max_duration_seconds=max_duration_seconds,
+                    progress_hook=progress_hook,
+                    preflight_info=preflight_info,
+                    client_override=client_override,
+                )
                 if not _is_supported_video_file(path, codec_mode):
                     raise DownloadFailed(f"Получился неподходящий файл для режима {codec_mode}: {path.suffix}")
                 if codec_mode == "mp4" and not _is_telegram_mp4(path):
@@ -1003,11 +1035,10 @@ def _download_with_fallbacks(url: str, job_id: str, max_duration_seconds: int | 
                 final = _move_final(path, job_id)
                 yt_thumb = _move_thumbnail(thumbnail_path, job_id)
                 cover = yt_thumb or _extract_frame_cover(final, job_id)
-                log.info("downloaded job %s via yt-dlp: type=video path=%s cover=%s", job_id, final, bool(cover))
+                log.info("downloaded job %s via yt-dlp: type=video path=%s client=%s cover=%s", job_id, final, client_override, bool(cover))
                 title, short_caption, full_caption = _build_captions(info, title_override=_youtube_localized_title(url))
                 caption = full_caption
 
-                # Extract accurate dimensions & duration from ffprobe or info dict
                 probe = _run_ffprobe(final)
                 streams = probe.get("streams") or []
                 video_s = next((s for s in streams if s.get("codec_type") == "video"), {})
@@ -1042,12 +1073,6 @@ def _download_with_fallbacks(url: str, job_id: str, max_duration_seconds: int | 
                 raise
             except (DownloadError, DownloadFailed, OSError) as exc:
                 last_error = exc
-                log.info("yt-dlp video attempt failed for %s: %s", job_id, exc)
-
-        if platform == "youtube":
-            raise DownloadFailed(str(last_error) if last_error else "yt-dlp не смог скачать YouTube-видео.")
-
-        if not prefer_gallery:
             try:
                 return _try_gallery_dl(url, workdir, job_id)
             except (DownloadFailed, DownloadRejected, subprocess.TimeoutExpired) as exc:
