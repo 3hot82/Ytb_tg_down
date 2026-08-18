@@ -920,6 +920,12 @@ def _media_type(path: Path) -> Literal["photo", "video", "document"]:
     return "document"
 
 
+def _clear_workdir(workdir: Path) -> None:
+    for child in workdir.rglob("*"):
+        if child.is_file():
+            child.unlink(missing_ok=True)
+
+
 def _try_gallery_dl(url: str, workdir: Path, job_id: str) -> DownloadResult:
     _clear_workdir(workdir)
     _, info = _download_gallery_dl(url, workdir)
