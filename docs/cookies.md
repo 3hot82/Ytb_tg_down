@@ -1,123 +1,74 @@
-# Cookies и Instagram
+# Управление Cookies для бота
 
-Некоторые сайты требуют cookies. Особенно часто это нужно для Instagram, TikTok, VK и YouTube age/private/private-like content.
+Некоторые платформы (YouTube для 18+/ограниченных видео, Instagram для закрытых постов/Reels/Stories, TikTok, VK) требуют cookies для стабильной загрузки.
 
-Админ-команды доступны только пользователям из `ADMIN_IDS`.
+Все команды управления cookies доступны **только администраторам** из `ADMIN_IDS`.
 
-## Загрузить cookies через Telegram
+---
+
+## 📱 Экспорт cookies с телефона (Android / iOS)
+
+Самый быстрый и удобный способ — использовать браузер с поддержкой расширений на телефоне.
+
+### Вариант 1: Android (Kiwi Browser или Lemur Browser)
+
+1. **Установите браузер:**
+   - Скачайте **Kiwi Browser** или **Lemur Browser** из Google Play (они поддерживают расширения Chrome).
+2. **Установите расширение для cookies:**
+   - Откройте в браузере Chrome Web Store и найдите расширение **Cookie-Editor** (или **Get cookies.txt LOCALLY**).
+   - Нажмите *Установить / Добавить в Chrome*.
+3. **Войдите на нужный сайт:**
+   - Откройте `https://www.youtube.com` или `https://www.instagram.com` и выполните вход в свой аккаунт.
+4. **Экспортируйте cookies:**
+   - Нажмите меню браузера `⋮` (в правом верхнем углу).
+   - В самом низу списка выберите **Cookie-Editor**.
+   - Нажмите кнопку **Export** (Экспорт) -> выберите **Export as Netscape / cookies.txt** (или скопируйте текст).
+   - Сохраните файл как `youtube.txt` (для YouTube) или `instagram.txt` (для Instagram).
+5. **Отправьте файл боту:**
+   - Откройте Telegram и отправьте полученный файл документом в диалог с ботом.
+   - Бот ответит: `✅ Cookies для youtube сохранены`.
+
+---
+
+### Вариант 2: Компьютер (Chrome / Firefox / Edge)
+
+1. Установите расширение **Cookie-Editor** или **Get cookies.txt LOCALLY** в ваш браузер на ПК.
+2. Войдите в свой аккаунт на YouTube или Instagram.
+3. Откройте расширение -> нажмите **Export as cookies.txt**.
+4. Сохраните файл под именем:
+   - `youtube.txt`
+   - `instagram.txt`
+   - `tiktok.txt`
+   - `vk.txt`
+5. Отправьте файл боту в Telegram как обычный документ.
+
+---
+
+## 🤖 Команды бота в Telegram
+
+| Команда | Описание |
+|---|---|
+| `/cookies` | Показать статус cookies по всем платформам (наличие и размер файлов) |
+| `/cookies_upload_instagram` | Подготовить бота к приёму cookies для Instagram (если файл называется не `instagram.txt`) |
+| `/cookies_upload_tiktok` | Подготовить бота к приёму cookies для TikTok |
+| `/cookies_upload_vk` | Подготовить бота к приёму cookies для VK |
+| `/redownload <url>` | Принудительно перекачать видео заново, минуя кэш |
+| `/stories <username>` | Скачать актуальные Stories пользователя Instagram (требуются `instagram.txt` cookies) |
+
+---
+
+## 🔍 Как проверить, что cookies работают
 
 1. Отправьте боту команду:
-
-```text
-/cookies instagram
-```
-
-2. Прикрепите файл cookies.
-
-Поддерживаемые имена:
-
-```text
-instagram.txt
-tiktok.txt
-vk.txt
-youtube.txt
-twitter.txt
-cookies.txt
-```
-
-3. Проверить статус:
-
-```text
-/cookies
-```
-
-## Instagram stories
-
-Команда:
-
-```text
-/stories username
-/stories @username
-/stories https://www.instagram.com/username?igsh=...
-```
-
-Обычная ссылка на Instagram-профиль сама по себе не запускает скачивание stories. Для stories нужна явная команда `/stories`.
-
-Важно:
-
-- для stories почти всегда нужны актуальные `instagram.txt` cookies;
-- аккаунт, из которого экспортированы cookies, должен иметь доступ к stories;
-- просроченные stories скачать нельзя.
-
-## Auth-browser на сервере
-
-Можно поднять серверный Chromium/noVNC, войти в Instagram и экспортировать cookies.
-
-### 1. Настроить пароль
-
-В `.env`:
-
-```env
-AUTH_BROWSER_USER=admin
-AUTH_BROWSER_PASSWORD=replace_with_long_random_password
-AUTH_BROWSER_PORT=33000
-AUTH_BROWSER_URL=http://127.0.0.1:33000/
-```
-
-### 2. Запустить browser
-
-```bash
-docker compose --profile auth up -d auth-browser
-```
-
-### 3. Открыть Chromium
-
-Локально на сервере:
-
-```text
-http://127.0.0.1:33000/
-```
-
-Если сервер удалён, используйте SSH tunnel:
-
-```bash
-ssh -L 33000:127.0.0.1:33000 user@server
-```
-
-После этого откройте на своём компьютере:
-
-```text
-http://127.0.0.1:33000/
-```
-
-### 4. Войти в Instagram
-
-Внутри Chromium войдите в нужный аккаунт.
-
-### 5. Экспортировать cookies
-
-Отправьте боту:
-
-```text
-/cookies_export
-```
-
-Проверить:
-
-```text
-/cookies
-```
-
-## Если cookies database locked
-
-Закройте вкладки сайта в auth-browser или перезапустите browser:
-
-```bash
-docker compose restart auth-browser
-```
-
-Потом снова:
-
-```text
-/cookies_export
-```
+   ```text
+   /cookies
+   ```
+   Ответ бота:
+   ```text
+   Cookies status:
+   instagram: ok, 1420 bytes
+   youtube: ok, 3810 bytes
+   tiktok: missing
+   vk: missing
+   ```
+2. Отправьте боту ссылку на видео с возрастным ограничением или закрытый пост — бот скачает его с использованием сохранённых cookies.

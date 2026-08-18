@@ -44,16 +44,31 @@ def _version() -> str:
     return proc.stdout.strip()
 
 
+import json
+import urllib.request
+
 def yt_dlp_update_needed() -> bool:
     _ensure_shared_binary()
-    proc = _run([str(YTDLP_BIN), "--update-to", "stable", "--simulate"])
-    output = proc.stdout or ""
-    log.info("yt-dlp update simulate rc=%s output=%s", proc.returncode, output.strip())
-    if proc.returncode not in (0, 100):
+    try:
+        req = urllib.request.urlopen("https://pypi.org/pypi/yt-dlp/json", timeout=10)
+        data = json.loads(req.read())
+        latest_version = data["info"]["version"]
+        current_version = _version().strip()
+        
+        def normalize_version(v: str) -> tuple:
+            return tuple(int(x) for x in v.split('.') if x.isdigit())
+            
+        latest_tuple = normalize_version(latest_version)
+        current_tuple = normalize_version(current_version)
+        
+        log.info("yt-dlp version check: current=%s pypi=%s", current_version, latest_version)
+        if not latest_tuple or not current_tuple:
+            return False
+            
+        return latest_tuple > current_tuple
+    except Exception as exc:
+        log.warning("failed to check pypi for yt-dlp update: %s", exc)
         return False
-    if NO_UPDATE_RE.search(output) and not NEEDS_UPDATE_RE.search(output):
-        return False
-    return bool(NEEDS_UPDATE_RE.search(output))
 
 
 async def wait_for_idle(redis: Redis) -> None:
@@ -83,8 +98,10 @@ def update_ytdlp() -> str:
         if proc.returncode != 0:
             raise RuntimeError("yt-dlp update failed")
         if not target.exists():
-            raise RuntimeError("updated yt-dlp executable was not created")
-        os.replace(target, YTDLP_BIN)
+            target = Path(tmp) / "bin" / "yt-dlp"
+            if not target.exists():
+                raise RuntimeError("updated yt-dlp executable was not created")
+        shutil.move(str(target), str(YTDLP_BIN))
         YTDLP_BIN.chmod(YTDLP_BIN.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
     return _version()
 

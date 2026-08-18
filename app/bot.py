@@ -320,14 +320,16 @@ async def _setup_bot_commands(bot: Bot) -> None:
     admin_commands = [
         BotCommand(command="start", description="Как пользоваться ботом"),
         BotCommand(command="redownload", description="Заново скачать видео, обойти кэш"),
-        BotCommand(command="login", description="Открыть серверный браузер для логина"),
         BotCommand(command="stories", description="Скачать Instagram stories username"),
         BotCommand(command="cookies", description="Проверить статус cookies"),
+        BotCommand(command="cookies_help", description="📖 Инструкция как получить cookies"),
         BotCommand(command="cookies_upload", description="Загрузить cookies.txt файлом"),
+        BotCommand(command="cookies_upload_youtube", description="Загрузить YouTube cookies"),
         BotCommand(command="cookies_upload_instagram", description="Загрузить Instagram cookies"),
         BotCommand(command="cookies_upload_tiktok", description="Загрузить TikTok cookies"),
         BotCommand(command="cookies_upload_vk", description="Загрузить VK cookies"),
         BotCommand(command="cookies_export", description="Экспортировать Instagram cookies из браузера"),
+        BotCommand(command="login", description="Открыть серверный браузер для логина"),
     ]
     await bot.set_my_commands(public_commands, scope=BotCommandScopeDefault())
     for admin_id in settings.admin_ids:
@@ -338,54 +340,36 @@ def _looks_like_netscape_cookies(data: bytes) -> bool:
     if not data or b"\x00" in data:
         return False
     text = data[:8192].decode("utf-8", errors="ignore")
-    if "# Netscape HTTP Cookie File" in text or "# HTTP Cookie File" in text:
-        return True
-    for line in text.splitlines():
-        if not line or line.startswith("#"):
-            continue
-        if len(line.split("\t")) >= 7:
-            return True
-    return False
+    return (
+        "# Netscape HTTP Cookie File" in text
+        or "# HTTP Cookie File" in text
+        or "\tTRUE\t" in text
+        or "\tFALSE\t" in text
+    )
 
 
-def _platform_from_filename(filename: str | None) -> str | None:
-    if not filename:
-        return None
-    name = Path(filename).name.lower()
-    stem = Path(name).stem
-    if stem in COOKIE_PLATFORMS:
-        return stem
-    for platform in COOKIE_PLATFORMS - {"cookies"}:
-        if platform in name:
-            return platform
+def _platform_from_filename(filename: str) -> str | None:
+    lower = filename.lower()
+    for name in ("instagram", "tiktok", "vk", "youtube", "twitter"):
+        if name in lower:
+            return name
+    if lower == "cookies.txt":
+        return "cookies"
     return None
 
 
 def _platform_from_cookie_data(data: bytes) -> str | None:
-    text = data.decode("utf-8", errors="ignore").lower()
-    domains: list[str] = []
-    for line in text.splitlines():
-        if not line or line.startswith("#"):
-            continue
-        parts = line.split("\t")
-        if len(parts) >= 7:
-            domains.append(parts[0].lstrip("."))
-    haystack = "\n".join(domains) if domains else text
-    matches: set[str] = set()
-    domain_markers = {
-        "instagram": ("instagram.com", ".instagram.com"),
-        "tiktok": ("tiktok.com", ".tiktok.com"),
-        "vk": ("vk.com", ".vk.com", "vkvideo.ru", ".vkvideo.ru"),
-        "youtube": ("youtube.com", ".youtube.com", "youtu.be", ".youtu.be", "googlevideo.com", ".googlevideo.com"),
-        "twitter": ("twitter.com", ".twitter.com", "x.com", ".x.com"),
-    }
-    for platform, markers in domain_markers.items():
-        if any(marker in haystack for marker in markers):
-            matches.add(platform)
-    if len(matches) == 1:
-        return next(iter(matches))
-    if len(matches) > 1:
-        return "cookies"
+    text = data[:8192].decode("utf-8", errors="ignore").lower()
+    if "instagram.com" in text:
+        return "instagram"
+    if "tiktok.com" in text:
+        return "tiktok"
+    if "vk.com" in text or "vkontakte.ru" in text:
+        return "vk"
+    if "youtube.com" in text or "google.com" in text:
+        return "youtube"
+    if "twitter.com" in text or "x.com" in text:
+        return "twitter"
     return None
 
 
@@ -396,8 +380,8 @@ async def _set_cookie_upload_target(message: Message, platform: str) -> None:
     await redis.set(f"{COOKIE_UPLOAD_PREFIX}{message.from_user.id}", platform, ex=600)
     await message.answer(
         f"Пришлите cookies-файл для <b>{platform}</b> документом в этот чат.\n\n"
-        "Нужен формат Netscape cookies.txt. На Android удобнее экспортировать через Kiwi/Lemur Browser "
-        "с расширением Cookie-Editor или Get cookies.txt LOCALLY."
+        "Нужен формат Netscape cookies.txt. Подробная инструкция: /cookies_help",
+        parse_mode="HTML",
     )
 
 
@@ -466,14 +450,43 @@ async def cookies_status(message: Message) -> None:
     if not _is_admin(message):
         return
     cookies_dir = Path(settings.data_dir) / "cookies"
-    lines = ["Cookies status:"]
-    for platform in ("instagram", "tiktok", "vk", "youtube", "twitter", "cookies"):
+    lines = ["<b>Статус Cookies:</b>"]
+    for platform in ("youtube", "instagram", "tiktok", "vk", "twitter", "cookies"):
         path = cookies_dir / f"{platform}.txt"
         if path.exists() and path.stat().st_size > 0:
-            lines.append(f"{platform}: ok, {path.stat().st_size} bytes")
+            lines.append(f"• <b>{platform}</b>: ✅ активен ({path.stat().st_size} байт)")
         else:
-            lines.append(f"{platform}: missing")
-    await message.answer("\n".join(lines))
+            lines.append(f"• <b>{platform}</b>: ❌ отсутствует")
+    lines.append("\n📖 <i>Инструкция как получить cookies:</i> /cookies_help")
+    await message.answer("\n".join(lines), parse_mode="HTML")
+
+
+@router.message(Command("cookies_help", "help_cookies", "cookies_info"))
+async def cookies_help_handler(message: Message) -> None:
+    if not _is_admin(message):
+        return
+    text = (
+        "📖 <b>Как экспортировать и загрузить Cookies в бота:</b>\n\n"
+        "📱 <b>С телефона (Android / Kiwi Browser):</b>\n"
+        "1. Установите <b>Kiwi Browser</b> (или Lemur Browser) из Google Play.\n"
+        "2. В браузере установите расширение <b>Cookie-Editor</b> (из Chrome Web Store).\n"
+        "3. Откройте нужный сайт (youtube.com / instagram.com) и войдите в свой аккаунт.\n"
+        "4. Нажмите меню <b>⋮</b> в правом верхнем углу ➔ выберите <b>Cookie-Editor</b>.\n"
+        "5. Нажмите <b>Export</b> ➔ выберите <b>Export as Netscape / cookies.txt</b>.\n"
+        "6. Переименуйте файл в <code>youtube.txt</code> или <code>instagram.txt</code> (или отправьте команду /cookies_upload_youtube).\n"
+        "7. <b>Отправьте этот файл боту как документ.</b>\n\n"
+        "💻 <b>С компьютера (Chrome / Firefox / Edge):</b>\n"
+        "1. Установите расширение <b>Cookie-Editor</b> или <b>Get cookies.txt LOCALLY</b>.\n"
+        "2. Войдите на сайт (YouTube, Instagram) и нажмите <i>Export as cookies.txt</i>.\n"
+        "3. Отправьте файл <code>youtube.txt</code> или <code>instagram.txt</code> документом в этот чат.\n\n"
+        "🔍 <b>Команды управления:</b>\n"
+        "• /cookies — проверить статус загруженных cookies\n"
+        "• /cookies_upload_youtube — подготовить загрузку YouTube\n"
+        "• /cookies_upload_instagram — подготовить загрузку Instagram\n"
+        "• /cookies_upload_tiktok — подготовить загрузку TikTok\n"
+        "• /cookies_upload_vk — подготовить загрузку VK"
+    )
+    await message.answer(text, parse_mode="HTML")
 
 
 @router.message(Command("cookies_upload"))
@@ -482,9 +495,18 @@ async def cookies_upload(message: Message) -> None:
         return
     await message.answer(
         "Пришлите cookies-файл документом.\n\n"
-        "Лучше назвать файл по платформе: instagram.txt, tiktok.txt, vk.txt, youtube.txt или cookies.txt.\n"
-        "Если имя другое, сначала используйте /cookies_upload_instagram, /cookies_upload_tiktok или /cookies_upload_vk."
+        "Лучше назвать файл по платформе: <code>youtube.txt</code>, <code>instagram.txt</code>, <code>tiktok.txt</code>, <code>vk.txt</code> или <code>cookies.txt</code>.\n"
+        "Если имя другое, сначала используйте команду платформы (например, /cookies_upload_youtube).\n\n"
+        "📖 Подробная инструкция: /cookies_help",
+        parse_mode="HTML",
     )
+
+
+@router.message(Command("cookies_upload_youtube"))
+async def cookies_upload_youtube(message: Message) -> None:
+    if not _is_admin(message):
+        return
+    await _set_cookie_upload_target(message, "youtube")
 
 
 @router.message(Command("cookies_upload_instagram"))

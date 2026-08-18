@@ -87,6 +87,18 @@ YOUTUBE_PLAYER_CLIENT=web_embedded
 - Если выбранного языка нет, бот автоматически падает обратно на original/default audio.
 - `YOUTUBE_PLAYER_CLIENT=web_embedded` помогает `yt-dlp` увидеть дополнительные дубляжи YouTube, например русскую дорожку у части роликов.
 
+### Audio loudness
+
+```env
+MEDIA_AUDIO_NORMALIZE=true
+MEDIA_AUDIO_LOUDNORM_I=-16
+MEDIA_AUDIO_LOUDNORM_TP=-1
+MEDIA_AUDIO_LOUDNORM_LRA=11
+```
+
+- `MEDIA_AUDIO_NORMALIZE=true` — после скачивания нормализовать аудио через ffmpeg `loudnorm`, чтобы TikTok/YouTube/Instagram-видео не были слишком тихими в Telegram.
+- Значения по умолчанию соответствуют нормальной громкости для речи/видео: `I=-16`, `TP=-1`, `LRA=11`.
+
 ### SponsorBlock timestamps
 
 ```env

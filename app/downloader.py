@@ -11,8 +11,8 @@ import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal
-from urllib.parse import urlencode, urlparse
-from urllib.request import urlopen
+from urllib.parse import parse_qs, urlencode, urlparse
+from urllib.request import Request, urlopen
 
 from typing import Callable
 
@@ -137,9 +137,15 @@ def _is_video_only_codec(fmt: dict[str, Any], codec_mode: str) -> bool:
 
 
 def _youtube_extractor_args() -> dict[str, dict[str, list[str]]]:
+    youtube_args: dict[str, list[str]] = {}
     if settings.youtube_multi_audio and settings.youtube_player_client:
-        return {"youtube": {"player_client": [settings.youtube_player_client]}}
-    return {}
+        youtube_args["player_client"] = [settings.youtube_player_client]
+    if settings.youtube_multi_audio and settings.youtube_audio_language:
+        # Ask YouTube for metadata in the same language as the selected audio track.
+        # yt-dlp passes this as YouTube UI/API language (`hl`), so titles/descriptions
+        # use YouTube's own localized values when the creator provided them.
+        youtube_args["lang"] = [settings.youtube_audio_language]
+    return {"youtube": youtube_args} if youtube_args else {}
 
 
 def _language_audio_selectors(base_selector: str, *, ext: str | None = None, acodec: str | None = None) -> str:
@@ -353,21 +359,87 @@ def _sponsorblock_text(info: dict[str, Any]) -> str | None:
     return "\n".join(lines)
 
 
-def _caption_from_info(info: dict[str, Any]) -> str | None:
-    caption = _clean_caption(str(info.get("title") or info.get("description") or ""))
-    parts = [caption] if caption else []
+def _caption_from_info(info: dict[str, Any], title_override: str | None = None) -> str | None:
+    title = _clean_caption(str(title_override or info.get("title") or info.get("description") or ""))
+    details: list[str] = []
     chapters = info.get("chapters")
     if chapters:
         ch_text = _chapters_text(chapters)
         if ch_text:
-            parts.append(ch_text)
+            details.append(ch_text)
     sb_text = _sponsorblock_text(info)
     if sb_text:
-        parts.append(sb_text)
-    result = "\n\n".join(parts) if parts else None
+        details.append(sb_text)
+
+    if title and details:
+        result = f"<b>{html.escape(title)}</b>\n\n— — —\n\n" + "\n\n".join(details)
+    elif title:
+        result = html.escape(title)
+    elif details:
+        result = "\n\n".join(details)
+    else:
+        result = None
+
     if result and len(result) > 1024:
         result = result[:1021].rstrip() + "…"
     return result
+
+
+def _youtube_video_id(url: str) -> str | None:
+    parsed = urlparse(url)
+    host = parsed.netloc.lower().split(":", 1)[0]
+    if host.endswith("youtu.be"):
+        video_id = parsed.path.strip("/").split("/", 1)[0]
+        return video_id or None
+    if "youtube.com" in host:
+        if parsed.path == "/watch":
+            video_id = parse_qs(parsed.query).get("v", [""])[0]
+            return video_id or None
+        for prefix in ("/shorts/", "/embed/"):
+            if parsed.path.startswith(prefix):
+                video_id = parsed.path[len(prefix):].split("/", 1)[0]
+                return video_id or None
+    return None
+
+
+def _html_json_unescape(text: str) -> str:
+    return html.unescape(json.loads(f'"{text}"'))
+
+
+def _youtube_localized_title(url: str) -> str | None:
+    if not settings.youtube_multi_audio or not settings.youtube_audio_language:
+        return None
+    video_id = _youtube_video_id(url)
+    if not video_id:
+        return None
+    lang = settings.youtube_audio_language
+    page_url = f"https://www.youtube.com/watch?{urlencode({'v': video_id, 'hl': lang, 'gl': lang.upper()})}"
+    try:
+        req = Request(
+            page_url,
+            headers={
+                "User-Agent": "Mozilla/5.0",
+                "Accept-Language": f"{lang},{lang}-{lang.upper()};q=0.9,en;q=0.5",
+            },
+        )
+        page = urlopen(req, timeout=15).read(2_000_000).decode("utf-8", errors="replace")
+    except Exception as exc:
+        log.info("failed to fetch YouTube localized title for %s lang=%s: %s", video_id, lang, exc)
+        return None
+    # YouTube keeps the original title in microformat/<title>, but the watch UI title
+    # is localized in videoPrimaryInfoRenderer as: "title":{"runs":[{"text":"..."}]}
+    patterns = (
+        r'"videoPrimaryInfoRenderer".*?"title"\s*:\s*\{"runs"\s*:\s*\[\{"text"\s*:\s*"(.*?)"',
+        r'"title"\s*:\s*\{"runs"\s*:\s*\[\{"text"\s*:\s*"(.*?)"',
+    )
+    for pattern in patterns:
+        match = re.search(pattern, page)
+        if not match:
+            continue
+        title = _clean_caption(_html_json_unescape(match.group(1)))
+        if title:
+            return title
+    return None
 
 
 def _host_platform(url: str) -> str | None:
@@ -441,6 +513,7 @@ def _run_ffprobe(path: Path) -> dict[str, Any]:
             str(path),
         ],
         text=True,
+        errors="replace",
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         check=False,
@@ -459,6 +532,57 @@ def _is_telegram_mp4(path: Path) -> bool:
     has_h264 = any(s.get("codec_type") == "video" and s.get("codec_name") == "h264" for s in streams)
     has_aac = any(s.get("codec_type") == "audio" and s.get("codec_name") == "aac" for s in streams)
     return has_h264 and has_aac
+
+
+def _has_audio_stream(path: Path) -> bool:
+    streams = (_run_ffprobe(path).get("streams") or [])
+    return any(s.get("codec_type") == "audio" for s in streams)
+
+
+def _normalize_audio(path: Path, codec_mode: str) -> Path:
+    if not settings.media_audio_normalize or not _has_audio_stream(path):
+        return path
+
+    normalized = path.with_name(f"{path.stem}.normalized{path.suffix}")
+    audio_codec = "libopus" if codec_mode in {"vp9", "av9"} or path.suffix.lower() == ".webm" else "aac"
+    cmd = [
+        "ffmpeg",
+        "-y",
+        "-i",
+        str(path),
+        "-map",
+        "0:v?",
+        "-map",
+        "0:a?",
+        "-c:v",
+        "copy",
+        "-c:a",
+        audio_codec,
+        "-af",
+        (
+            "loudnorm="
+            f"I={settings.media_audio_loudnorm_i}:"
+            f"TP={settings.media_audio_loudnorm_tp}:"
+            f"LRA={settings.media_audio_loudnorm_lra}"
+        ),
+    ]
+    if normalized.suffix.lower() == ".mp4":
+        cmd.extend(["-movflags", "+faststart"])
+    cmd.append(str(normalized))
+
+    proc = subprocess.run(cmd, text=True, errors="replace", stdout=subprocess.PIPE, stderr=subprocess.STDOUT, check=False, timeout=settings.download_timeout_seconds)
+    if proc.returncode != 0 or not normalized.exists() or normalized.stat().st_size == 0:
+        log.warning("audio normalization failed for %s: %s", path, proc.stdout[-1000:])
+        normalized.unlink(missing_ok=True)
+        return path
+
+    if not _filesize_ok(normalized):
+        normalized.unlink(missing_ok=True)
+        raise DownloadRejected(f"Файл больше {settings.max_file_mb} MB после нормализации аудио.")
+
+    path.unlink(missing_ok=True)
+    log.info("normalized audio for %s -> %s", path.name, normalized.name)
+    return normalized
 
 
 def describe_media(path: Path) -> str:
@@ -490,7 +614,7 @@ def _ensure_ytdlp_bin() -> str:
 
 def _check_ytdlp_bin() -> None:
     bin_path = _ensure_ytdlp_bin()
-    proc = subprocess.run([bin_path, "--version"], text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, check=False)
+    proc = subprocess.run([bin_path, "--version"], text=True, errors="replace", stdout=subprocess.PIPE, stderr=subprocess.STDOUT, check=False)
     if proc.returncode != 0:
         log.warning("yt-dlp binary check failed: %s", proc.stdout.strip())
 
@@ -543,6 +667,7 @@ def _download_ytdlp_video(url: str, workdir: Path, fmt: str, *, merge: bool = Fa
         raise DownloadFailed("MP4 файл не найден после загрузки.")
     if not _filesize_ok(found):
         raise DownloadRejected(f"Файл больше {settings.max_file_mb} MB.")
+    found = _normalize_audio(found, codec_mode)
     thumbnail = _find_ytdlp_thumbnail(workdir, found)
     return found, info, thumbnail
 
@@ -584,7 +709,7 @@ def _download_gallery_dl(url: str, workdir: Path) -> tuple[Path, dict[str, Any]]
     cookie_file = _cookie_file_for_url(url)
     if cookie_file:
         cmd[1:1] = ["--cookies", str(cookie_file)]
-    proc = subprocess.run(cmd, text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, check=False, timeout=settings.download_timeout_seconds)
+    proc = subprocess.run(cmd, text=True, errors="replace", stdout=subprocess.PIPE, stderr=subprocess.STDOUT, check=False, timeout=settings.download_timeout_seconds)
     if proc.returncode != 0:
         raise DownloadFailed(f"gallery-dl не смог скачать медиа: {proc.stdout.strip()[-500:]}")
     found = _find_gallery_media(workdir)
@@ -729,6 +854,8 @@ def _move_final(path: Path, job_id: str) -> Path:
 def _move_gallery_finals(paths: list[Path], job_id: str) -> list[Path]:
     finals: list[Path] = []
     for index, path in enumerate(paths, start=1):
+        if path.suffix.lower() in VIDEO_EXTS:
+            path = _normalize_audio(path, "mp4")
         final = DOWNLOAD_DIR / f"{job_id}-{index:02d}{path.suffix.lower()}"
         shutil.move(str(path), final)
         finals.append(final)
@@ -777,6 +904,8 @@ def _try_gallery_dl(url: str, workdir: Path, job_id: str) -> DownloadResult:
 def _try_og_media(url: str, workdir: Path, job_id: str) -> DownloadResult:
     _clear_workdir(workdir)
     path, info = _download_og_media(url, workdir)
+    if path.suffix.lower() in VIDEO_EXTS:
+        path = _normalize_audio(path, "mp4")
     final = _move_final(path, job_id)
     result = DownloadResult(path=final, media_type=_media_type(final), caption=_caption_from_info(info), extractor="og-meta")
     log.info("downloaded job %s via og-meta: type=%s path=%s", job_id, result.media_type, final)
@@ -829,12 +958,13 @@ def _download_with_fallbacks(url: str, job_id: str, max_duration_seconds: int | 
                 frame_cover = _extract_frame_cover(final, job_id)
                 cover = frame_cover or _move_thumbnail(thumbnail_path, job_id)
                 log.info("downloaded job %s via yt-dlp: type=video path=%s cover=%s", job_id, final, bool(cover))
+                caption = _caption_from_info(info, title_override=_youtube_localized_title(url))
                 return DownloadResult(
                     path=final,
                     media_type="video",
-                    caption=_caption_from_info(info),
+                    caption=caption,
                     extractor="yt-dlp",
-                    items=(DownloadItem(final, "video", _caption_from_info(info), cover_path=cover, width=info.get("width"), height=info.get("height"), duration=info.get("duration")),),
+                    items=(DownloadItem(final, "video", caption, cover_path=cover, width=info.get("width"), height=info.get("height"), duration=info.get("duration")),),
                 )
             except DownloadRejected as exc:
                 log.info("yt-dlp video rejected for %s: %s", job_id, exc)

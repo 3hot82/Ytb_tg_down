@@ -31,6 +31,7 @@ services:
     depends_on:
       - redis
     volumes:
+      - ./app:/app/app
       - ytdlp-bin:/opt/ytdlp
       - cookies-data:/app/data
       - browser-profile:/browser-profile:ro
@@ -43,6 +44,7 @@ services:
     depends_on:
       - redis
     volumes:
+      - ./app:/app/app
       - downloads:/app/downloads
       - ytdlp-bin:/opt/ytdlp
       - cookies-data:/app/data
@@ -55,6 +57,7 @@ services:
     depends_on:
       - redis
     volumes:
+      - ./app:/app/app
       - ytdlp-bin:/opt/ytdlp
       - cookies-data:/app/data
     command: ["python", "-m", "app.watcher"]

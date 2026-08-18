@@ -4,7 +4,7 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     PIP_NO_CACHE_DIR=1 \
     YTDLP_BIN=/opt/ytdlp/yt-dlp
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends ffmpeg ca-certificates curl unzip \
+    && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends ffmpeg ca-certificates curl unzip \
     && curl -fsSL https://deno.land/install.sh | DENO_INSTALL=/usr sh \
     && rm -rf /var/lib/apt/lists/*
 WORKDIR /app
