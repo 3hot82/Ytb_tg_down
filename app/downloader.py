@@ -977,16 +977,37 @@ def _download_with_fallbacks(url: str, job_id: str, max_duration_seconds: int | 
                 if codec_mode == "mp4" and not _is_telegram_mp4(path):
                     log.warning("%s is not confirmed h264+aac; accepting as video fallback", path)
                 final = _move_final(path, job_id)
-                frame_cover = _extract_frame_cover(final, job_id)
-                cover = frame_cover or _move_thumbnail(thumbnail_path, job_id)
+                yt_thumb = _move_thumbnail(thumbnail_path, job_id)
+                cover = yt_thumb or _extract_frame_cover(final, job_id)
                 log.info("downloaded job %s via yt-dlp: type=video path=%s cover=%s", job_id, final, bool(cover))
                 caption = _caption_from_info(info, title_override=_youtube_localized_title(url))
+
+                # Extract accurate dimensions & duration from ffprobe or info dict
+                probe = _run_ffprobe(final)
+                streams = probe.get("streams") or []
+                video_s = next((s for s in streams if s.get("codec_type") == "video"), {})
+                width = int(video_s.get("width") or info.get("width") or 0) or None
+                height = int(video_s.get("height") or info.get("height") or 0) or None
+                dur_val = info.get("duration") or float(probe.get("format", {}).get("duration") or 0)
+                duration = int(dur_val) if dur_val else None
+
                 return DownloadResult(
                     path=final,
                     media_type="video",
                     caption=caption,
                     extractor="yt-dlp",
-                    items=(DownloadItem(final, "video", caption, cover_path=cover, width=info.get("width"), height=info.get("height"), duration=info.get("duration")),),
+                    items=(
+                        DownloadItem(
+                            path=final,
+                            media_type="video",
+                            caption=caption,
+                            thumbnail_path=cover,
+                            cover_path=cover,
+                            width=width,
+                            height=height,
+                            duration=duration,
+                        ),
+                    ),
                 )
             except DownloadRejected as exc:
                 log.info("yt-dlp video rejected for %s: %s", job_id, exc)

@@ -261,19 +261,24 @@ async def process_job(redis: Redis, bot: Bot, job: MediaJob) -> None:
                 await _cache_sent_message(redis, job, "photo", sent, item.caption, enabled=cache_enabled)
                 await _set_progress(bot, job, "✅ Фото отправлено")
             elif item.media_type == "video":
-                generated_thumbnail = _make_video_thumbnail(item.path)
-                thumbnail = item.thumbnail_path or generated_thumbnail
+                generated_thumbnail = None
+                thumbnail = item.thumbnail_path
+                if not thumbnail or not thumbnail.exists():
+                    generated_thumbnail = _make_video_thumbnail(item.path)
+                    thumbnail = generated_thumbnail
                 cover = item.cover_path
                 try:
                     sent = await bot.send_video(
                         chat_id=job.chat_id,
                         video=FSInputFile(item.path),
-                        thumbnail=FSInputFile(thumbnail) if thumbnail else None,
-                        cover=FSInputFile(cover) if cover else None,
+                        thumbnail=FSInputFile(thumbnail) if thumbnail and thumbnail.exists() else None,
+                        cover=FSInputFile(cover) if cover and cover.exists() else None,
                         caption=item.caption,
                         reply_to_message_id=job.message_id,
                         supports_streaming=True,
                         duration=item.duration,
+                        width=item.width,
+                        height=item.height,
                     )
                     await _cache_sent_message(redis, job, "video", sent, item.caption, enabled=cache_enabled)
                     await _set_progress(bot, job, "✅ Видео отправлено")
