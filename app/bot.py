@@ -15,12 +15,26 @@ from aiogram.client.telegram import TelegramAPIServer
 from aiogram.enums import ParseMode
 from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError
 from aiogram.filters import Command, CommandStart
-from aiogram.types import BotCommand, BotCommandScopeChat, BotCommandScopeDefault, Message
+from aiogram.types import BotCommand, BotCommandScopeChat, BotCommandScopeDefault, CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
 from redis.asyncio import Redis
 
+from . import admin
 from .config import settings
+from .i18n import detect_language, t
+from .middlewares import SubscriptionMiddleware
 from .models import MediaJob
-from .redis_keys import JOB_PREFIX, MEDIA_CACHE_PREFIX, PAUSE_FLAG, PENDING_JOBS_CHAT_PREFIX, PENDING_JOBS_USER_PREFIX, URL_INFLIGHT_PREFIX, URL_WAITERS_PREFIX
+from .redis_keys import (
+    JOB_PREFIX,
+    MEDIA_CACHE_PREFIX,
+    PAUSE_FLAG,
+    PENDING_JOBS_CHAT_PREFIX,
+    PENDING_JOBS_USER_PREFIX,
+    REQUIRED_CHANNELS,
+    URL_INFLIGHT_PREFIX,
+    URL_WAITERS_PREFIX,
+    USERS_ALL,
+    USER_LANG_PREFIX,
+)
 
 log = logging.getLogger(__name__)
 
@@ -74,6 +88,30 @@ COOKIE_UPLOAD_PREFIX = "cookie_upload:"
 
 router = Router()
 redis: Redis | None = None
+
+
+async def _track_user(user: Any) -> None:
+    if not user or redis is None:
+        return
+    try:
+        await redis.sadd(USERS_ALL, str(user.id))
+        if not await redis.exists(f"{USER_LANG_PREFIX}{user.id}"):
+            default_lang = detect_language(getattr(user, "language_code", None))
+            await redis.set(f"{USER_LANG_PREFIX}{user.id}", default_lang)
+    except Exception as exc:
+        log.debug("failed to track user %s: %s", getattr(user, "id", None), exc)
+
+
+async def _get_user_lang(user_id: int | None, language_code: str | None = None) -> str:
+    if not user_id or redis is None:
+        return detect_language(language_code)
+    try:
+        saved = await redis.get(f"{USER_LANG_PREFIX}{user_id}")
+        if saved:
+            return saved.decode("utf-8") if isinstance(saved, bytes) else saved
+    except Exception:
+        pass
+    return detect_language(language_code)
 
 
 
@@ -203,15 +241,19 @@ async def _release_pending(jobs: list[MediaJob]) -> None:
 
 async def _queue_urls(message: Message, urls: list[str], *, force_download: bool = False) -> None:
     assert redis is not None
+    await _track_user(message.from_user)
+    user_id = message.from_user.id if message.from_user else None
+    user_lang = await _get_user_lang(user_id, message.from_user.language_code if message.from_user else None)
+
     if await redis.get(PAUSE_FLAG):
-        await _temporary_reply(message, "Обновляю загрузчик, новые задачи временно на паузе. Попробуйте чуть позже.")
+        await _temporary_reply(message, t("queue.pause", user_lang))
         return
 
     urls = list(dict.fromkeys(_canonical_url(url) for url in urls))
     if not urls:
         return
     if len(urls) > settings.max_urls_per_message:
-        await _temporary_reply(message, f"Слишком много ссылок в одном сообщении: максимум {settings.max_urls_per_message}.")
+        await _temporary_reply(message, t("queue.too_many_urls", user_lang, max_urls=settings.max_urls_per_message))
         return
 
     queue_urls: list[str] = []
@@ -253,11 +295,10 @@ async def _queue_urls(message: Message, urls: list[str], *, force_download: bool
     queue_urls = filtered_urls
 
     chat_id = message.chat.id
-    user_id = message.from_user.id if message.from_user else None
     is_direct_chat = message.chat.type == "private"
     progress_message_id = None
     if is_direct_chat:
-        status = await message.answer("⏳ Принял ссылку. Жду очередь…", reply_to_message_id=message.message_id)
+        status = await message.answer(t("queue.wait", user_lang), reply_to_message_id=message.message_id)
         progress_message_id = status.message_id
     jobs = [
         MediaJob.create(
@@ -275,9 +316,7 @@ async def _queue_urls(message: Message, urls: list[str], *, force_download: bool
     if not await _reserve_pending(jobs):
         await _temporary_reply(
             message,
-            "Очередь заполнена. Лимиты: "
-            f"{settings.max_pending_jobs_per_chat} задач на чат и "
-            f"{settings.max_pending_jobs_per_user} задач на пользователя.",
+            t("queue.full", user_lang, max_chat=settings.max_pending_jobs_per_chat, max_user=settings.max_pending_jobs_per_user),
         )
         return
 
@@ -315,10 +354,17 @@ async def _temporary_reply(message: Message, text: str, *, delay: int = 5) -> No
 
 async def _setup_bot_commands(bot: Bot) -> None:
     public_commands = [
+        BotCommand(command="start", description="Главное меню / Main menu"),
+        BotCommand(command="lang", description="Сменить язык / Switch language"),
+        BotCommand(command="help", description="Справка / Help"),
+        BotCommand(command="stories", description="Скачать Instagram stories username"),
         BotCommand(command="redownload", description="Заново скачать видео, обойти кэш"),
     ]
     admin_commands = [
-        BotCommand(command="start", description="Как пользоваться ботом"),
+        BotCommand(command="admin", description="🛠 Админ-панель (ОП, статистика, рассылка)"),
+        BotCommand(command="start", description="Главное меню / Main menu"),
+        BotCommand(command="lang", description="Сменить язык / Switch language"),
+        BotCommand(command="help", description="Справка / Help"),
         BotCommand(command="redownload", description="Заново скачать видео, обойти кэш"),
         BotCommand(command="stories", description="Скачать Instagram stories username"),
         BotCommand(command="cookies", description="Проверить статус cookies"),
@@ -420,17 +466,87 @@ async def _export_cookies(platform: str = "instagram") -> tuple[bool, str]:
     return True, f"exported {cookies_path.stat().st_size} bytes to {cookies_path}"
 
 
-
-
-
-
-
 @router.message(CommandStart())
 async def start(message: Message) -> None:
-    await message.answer(
-        "Пришлите ссылку YouTube, TikTok, VK или Instagram. Скачаю короткое видео/фото до "
-        f"{settings.max_file_mb} MB. Плейлисты и live не принимаю."
+    await _track_user(message.from_user)
+    lang = await _get_user_lang(message.from_user.id if message.from_user else None, message.from_user.language_code if message.from_user else None)
+    name = message.from_user.first_name if message.from_user else "User"
+    await message.answer(t("start.welcome", lang, name=name))
+
+
+@router.message(Command("help"))
+async def help_cmd(message: Message) -> None:
+    await _track_user(message.from_user)
+    lang = await _get_user_lang(message.from_user.id if message.from_user else None, message.from_user.language_code if message.from_user else None)
+    await message.answer(t("help.text", lang))
+
+
+@router.message(Command("lang", "language"))
+async def lang_cmd(message: Message) -> None:
+    await _track_user(message.from_user)
+    lang = await _get_user_lang(message.from_user.id if message.from_user else None, message.from_user.language_code if message.from_user else None)
+    kb = InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(text="🇷🇺 Русский", callback_data="set_lang_ru"),
+                InlineKeyboardButton(text="🇬🇧 English", callback_data="set_lang_en"),
+            ]
+        ]
     )
+    await message.answer(t("lang.choose", lang), reply_markup=kb)
+
+
+@router.callback_query(F.data.in_({"set_lang_ru", "set_lang_en"}))
+async def cb_set_lang(callback: CallbackQuery) -> None:
+    if not callback.from_user or redis is None:
+        return
+    new_lang = "ru" if callback.data == "set_lang_ru" else "en"
+    await redis.set(f"{USER_LANG_PREFIX}{callback.from_user.id}", new_lang)
+    await _track_user(callback.from_user)
+    if callback.message:
+        await callback.message.edit_text(t("lang.changed", new_lang))
+    await callback.answer()
+
+
+@router.callback_query(F.data == "check_sub")
+async def cb_check_sub(callback: CallbackQuery, bot: Bot) -> None:
+    if not callback.from_user or redis is None:
+        return
+    user_id = callback.from_user.id
+    lang = await _get_user_lang(user_id, callback.from_user.language_code)
+    raw_channels = await redis.hgetall(REQUIRED_CHANNELS)
+    not_subscribed = False
+    for chan_id_str in raw_channels:
+        try:
+            member = await bot.get_chat_member(chat_id=int(chan_id_str), user_id=user_id)
+            if member.status not in {"creator", "administrator", "member", "restricted"}:
+                not_subscribed = True
+                break
+        except Exception:
+            not_subscribed = True
+            break
+
+    if not_subscribed:
+        await callback.answer(t("sub.not_yet", lang), show_alert=True)
+        return
+
+    await callback.answer(t("sub.success", lang), show_alert=True)
+    if callback.message:
+        try:
+            await callback.message.delete()
+        except Exception:
+            pass
+
+    # Check if there is a pending URL from before subscription
+    pending_key = f"ytbot:pending_url:{user_id}"
+    pending_text = await redis.get(pending_key)
+    if pending_text and callback.message:
+        await redis.delete(pending_key)
+        urls = _extract_supported_urls(pending_text)
+        if urls:
+            fake_msg = callback.message
+            fake_msg.from_user = callback.from_user
+            await _queue_urls(fake_msg, urls)
 
 
 @router.message(Command("login"))
@@ -635,9 +751,20 @@ async def main() -> None:
 
     global redis
     redis = Redis.from_url(settings.redis_url, decode_responses=True)
+    admin.set_redis(redis)
+
     bot = Bot(settings.bot_token, session=_bot_session(), default=DefaultBotProperties(parse_mode=ParseMode.HTML))
     dp = Dispatcher()
+
+    # Middleware for forced subscription check
+    sub_middleware = SubscriptionMiddleware(redis)
+    dp.message.outer_middleware(sub_middleware)
+    dp.callback_query.outer_middleware(sub_middleware)
+
+    # Include routers (admin router handles /admin and broadcast)
+    dp.include_router(admin.router)
     dp.include_router(router)
+
     await _setup_bot_commands(bot)
     try:
         await dp.start_polling(bot)
