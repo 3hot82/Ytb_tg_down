@@ -15,7 +15,7 @@ from aiogram.types import FSInputFile, Message
 from redis.asyncio import Redis
 
 from .config import settings
-from .downloader import DownloadRejected, cleanup_file, describe_media, download_media
+from .downloader import DownloadItem, DownloadRejected, cleanup_file, describe_media, download_media
 from .models import MediaJob
 from .redis_keys import ACTIVE_JOBS, JOB_PREFIX, MEDIA_CACHE_PREFIX, PAUSE_FLAG, PENDING_JOBS_CHAT_PREFIX, PENDING_JOBS_USER_PREFIX, URL_INFLIGHT_PREFIX, URL_WAITERS_PREFIX
 
@@ -38,23 +38,26 @@ def _bot_session() -> AiohttpSession:
 
 
 async def _release(redis: Redis, job: MediaJob) -> None:
-    # Bot no longer uses CHAT_LOCK; only cleanup JOB_PREFIX.
-    await redis.delete(f"{JOB_PREFIX}{job.id}")
+    if job.user_id is not None:
+        await redis.delete(f"{JOB_PREFIX}{job.user_id}")
 
 
-async def _delete_message(bot: Bot, chat_id: int, message_id: int | None) -> None:
-    if message_id is None:
-        return
+async def _delete_message(bot: Bot, chat_id: int, message_id: int) -> None:
     try:
-        await bot.delete_message(chat_id, message_id)
-    except (TelegramBadRequest, TelegramForbiddenError):
-        log.debug("failed to delete message chat=%s message=%s", chat_id, message_id, exc_info=True)
+        await bot.delete_message(chat_id=chat_id, message_id=message_id)
+    except TelegramBadRequest as exc:
+        if "message to delete not found" not in str(exc).lower():
+            log.debug("failed to delete message chat=%s message=%s: %s", chat_id, message_id, exc)
+    except TelegramForbiddenError:
+        log.debug("forbidden to delete message chat=%s message=%s", chat_id, message_id)
 
 
 def _progress_target(job: MediaJob) -> tuple[int, int] | None:
-    if job.progress_chat_id is None or job.progress_message_id is None:
-        return None
-    return job.progress_chat_id, job.progress_message_id
+    if job.progress_chat_id and job.progress_message_id:
+        return job.progress_chat_id, job.progress_message_id
+    if job.status_message_id:
+        return job.chat_id, job.status_message_id
+    return None
 
 
 async def _set_progress(bot: Bot, job: MediaJob, text: str) -> None:
@@ -96,7 +99,7 @@ def _make_video_thumbnail(video_path: Path) -> Path | None:
                 "-frames:v",
                 "1",
                 "-vf",
-                "scale='min(320,iw)':-2",
+                "scale='min(640,iw)':-2",
                 "-q:v",
                 "3",
                 str(thumb_path),
@@ -124,7 +127,23 @@ def _legacy_media_cache_key(url: str) -> str:
     return f"{MEDIA_CACHE_PREFIX}{url}"
 
 
-async def _try_send_cached(redis: Redis, bot: Bot, job: MediaJob) -> bool:
+def _format_caption_for_chat(item: DownloadItem, chat_id: int, bot_username: str | None = None) -> str | None:
+    is_group = chat_id < 0
+    base = (item.short_caption if is_group else item.full_caption) or item.caption
+    if not base:
+        return None
+    promo = f"\n\n📥 @{bot_username}" if bot_username else ""
+    caption = f"{base}{promo}"
+    if len(caption) > 1024:
+        avail = 1024 - len(promo) - 3
+        if avail > 0 and len(base) > avail:
+            caption = f"{base[:avail].rstrip()}…{promo}"
+        else:
+            caption = caption[:1021].rstrip() + "…"
+    return caption
+
+
+async def _try_send_cached(redis: Redis, bot: Bot, job: MediaJob, bot_username: str | None = None) -> bool:
     cache_key = _media_cache_key(job.url)
     legacy_key = _legacy_media_cache_key(job.url)
     if job.force_download:
@@ -134,21 +153,40 @@ async def _try_send_cached(redis: Redis, bot: Bot, job: MediaJob) -> bool:
     raw = await redis.get(cache_key)
     if not raw:
         return False
-    media_type, file_id, caption = (raw.split("\t", 2) + [None, None, None])[:3]
-    if media_type not in {"photo", "video", "document"}:
+
+    is_group = job.chat_id < 0
+    try:
+        data = json.loads(raw)
+        media_type = data.get("media_type")
+        file_id = data.get("file_id")
+        base_caption = (data.get("short_caption") if is_group else data.get("full_caption")) or data.get("full_caption") or data.get("short_caption") or data.get("title")
+    except Exception:
+        media_type, file_id, base_caption = (raw.split("\t", 2) + [None, None, None])[:3]
+
+    if media_type not in {"photo", "video", "document"} or not file_id:
         await redis.delete(cache_key)
         return False
-    if not file_id:
-        await redis.delete(cache_key)
-        return False
+
+    promo = f"\n\n📥 @{bot_username}" if bot_username else ""
+    if base_caption:
+        caption = f"{base_caption}{promo}"
+        if len(caption) > 1024:
+            avail = 1024 - len(promo) - 3
+            if avail > 0 and len(base_caption) > avail:
+                caption = f"{base_caption[:avail].rstrip()}…{promo}"
+            else:
+                caption = caption[:1021].rstrip() + "…"
+    else:
+        caption = None
+
     try:
         if media_type == "photo":
-            await bot.send_photo(job.chat_id, file_id, caption=caption or None, reply_to_message_id=job.message_id)
+            await bot.send_photo(job.chat_id, file_id, caption=caption, reply_to_message_id=job.message_id)
         elif media_type == "video":
-            await bot.send_video(job.chat_id, file_id, caption=caption or None, reply_to_message_id=job.message_id, supports_streaming=True)
+            await bot.send_video(job.chat_id, file_id, caption=caption, reply_to_message_id=job.message_id, supports_streaming=True)
         else:
-            await bot.send_document(job.chat_id, file_id, caption=caption or None, reply_to_message_id=job.message_id)
-        log.info("job %s sent from telegram file_id cache url=%s type=%s", job.id, job.url, media_type)
+            await bot.send_document(job.chat_id, file_id, caption=caption, reply_to_message_id=job.message_id)
+        log.info("job %s sent from telegram file_id cache url=%s type=%s is_group=%s", job.id, job.url, media_type, is_group)
         return True
     except TelegramBadRequest as exc:
         await redis.delete(cache_key)
@@ -171,7 +209,7 @@ async def _cache_sent_message(
     job: MediaJob,
     media_type: str,
     message: Message,
-    caption: str | None,
+    item: DownloadItem,
     *,
     enabled: bool,
 ) -> None:
@@ -181,10 +219,16 @@ async def _cache_sent_message(
     if not file_id:
         log.warning("job %s sent but no file_id returned for cache", job.id)
         return
-    safe_caption = (caption or "").replace("\t", " ").replace("\n", " ")
+    payload = {
+        "media_type": media_type,
+        "file_id": file_id,
+        "title": item.title,
+        "short_caption": item.short_caption,
+        "full_caption": item.full_caption or item.caption,
+    }
     await redis.set(
         _media_cache_key(job.url),
-        f"{media_type}\t{file_id}\t{safe_caption}",
+        json.dumps(payload, ensure_ascii=False),
         ex=settings.media_cache_ttl_seconds,
     )
     log.info("cached telegram file_id for url=%s type=%s ttl=%s", job.url, media_type, settings.media_cache_ttl_seconds)
@@ -201,9 +245,8 @@ async def _release_pending(redis: Redis, job: MediaJob) -> None:
     await pipe.execute()
 
 
-async def process_job(redis: Redis, bot: Bot, job: MediaJob) -> None:
-    await redis.hset(ACTIVE_JOBS, job.id, str(job.chat_id))
-    await redis.expire(ACTIVE_JOBS, settings.job_ttl_seconds)
+async def process_job(redis: Redis, bot: Bot, job: MediaJob, bot_username: str | None = None) -> None:
+    await redis.hset(ACTIVE_JOBS, job.id, time.time())
     result = None
     loop = asyncio.get_running_loop()
     last_progress = 0.0
@@ -229,7 +272,7 @@ async def process_job(redis: Redis, bot: Bot, job: MediaJob) -> None:
         loop.call_soon_threadsafe(lambda: asyncio.create_task(_set_progress(bot, job, text)))
 
     try:
-        if await _try_send_cached(redis, bot, job):
+        if await _try_send_cached(redis, bot, job, bot_username=bot_username):
             await _set_progress(bot, job, "✅ Отправил из кэша")
             return
         is_admin = job.user_id is not None and job.user_id in settings.admin_ids
@@ -251,14 +294,15 @@ async def process_job(redis: Redis, bot: Bot, job: MediaJob) -> None:
         for item in items:
             if item.path.stat().st_size > settings.max_file_bytes:
                 raise DownloadRejected(f"Файл больше {settings.max_file_mb} MB.")
+            caption = _format_caption_for_chat(item, job.chat_id, bot_username=bot_username)
             if item.media_type == "photo":
                 sent = await bot.send_photo(
                     chat_id=job.chat_id,
                     photo=FSInputFile(item.path),
-                    caption=item.caption,
+                    caption=caption,
                     reply_to_message_id=job.message_id,
                 )
-                await _cache_sent_message(redis, job, "photo", sent, item.caption, enabled=cache_enabled)
+                await _cache_sent_message(redis, job, "photo", sent, item, enabled=cache_enabled)
                 await _set_progress(bot, job, "✅ Фото отправлено")
             elif item.media_type == "video":
                 generated_thumbnail = None
@@ -273,14 +317,14 @@ async def process_job(redis: Redis, bot: Bot, job: MediaJob) -> None:
                         video=FSInputFile(item.path),
                         thumbnail=FSInputFile(thumbnail) if thumbnail and thumbnail.exists() else None,
                         cover=FSInputFile(cover) if cover and cover.exists() else None,
-                        caption=item.caption,
+                        caption=caption,
                         reply_to_message_id=job.message_id,
                         supports_streaming=True,
                         duration=item.duration,
                         width=item.width,
                         height=item.height,
                     )
-                    await _cache_sent_message(redis, job, "video", sent, item.caption, enabled=cache_enabled)
+                    await _cache_sent_message(redis, job, "video", sent, item, enabled=cache_enabled)
                     await _set_progress(bot, job, "✅ Видео отправлено")
                 finally:
                     if generated_thumbnail:
@@ -289,10 +333,10 @@ async def process_job(redis: Redis, bot: Bot, job: MediaJob) -> None:
                 sent = await bot.send_document(
                     chat_id=job.chat_id,
                     document=FSInputFile(item.path),
-                    caption=item.caption,
+                    caption=caption,
                     reply_to_message_id=job.message_id,
                 )
-                await _cache_sent_message(redis, job, "document", sent, item.caption, enabled=cache_enabled)
+                await _cache_sent_message(redis, job, "document", sent, item, enabled=cache_enabled)
                 await _set_progress(bot, job, "✅ Файл отправлен")
     except DownloadRejected as exc:
         await _send_error(bot, job, f"Не могу скачать: {exc}")
@@ -310,24 +354,38 @@ async def process_job(redis: Redis, bot: Bot, job: MediaJob) -> None:
                     cleanup_file(item.thumbnail_path)
                 if item.cover_path:
                     cleanup_file(item.cover_path)
-        # Send cached result to waiters who requested same URL while it was downloading
         waiter_key = f"{URL_WAITERS_PREFIX}{job.url}"
         waiter_raws = await redis.smembers(waiter_key)
         if waiter_raws:
             cache_raw = await redis.get(f"{MEDIA_CACHE_PREFIX}{job.url}")
             if cache_raw:
-                media_type, file_id, _ = (cache_raw.split("\t", 2) + [None, None, None])[:3]
+                try:
+                    cdata = json.loads(cache_raw)
+                    media_type = cdata.get("media_type")
+                    file_id = cdata.get("file_id")
+                except Exception:
+                    media_type, file_id, _ = (cache_raw.split("\t", 2) + [None, None, None])[:3]
                 if media_type in {"photo", "video", "document"} and file_id:
                     for waiter_raw in waiter_raws:
                         try:
                             waiter = json.loads(waiter_raw)
-                            if media_type == "photo":
-                                await bot.send_photo(waiter["chat_id"], file_id, reply_to_message_id=waiter.get("message_id"))
-                            elif media_type == "video":
-                                await bot.send_video(waiter["chat_id"], file_id, reply_to_message_id=waiter.get("message_id"), supports_streaming=True)
-                            else:
-                                await bot.send_document(waiter["chat_id"], file_id, reply_to_message_id=waiter.get("message_id"))
-                            log.info("sent cached to waiter chat=%s url=%s", waiter["chat_id"], job.url)
+                            w_chat_id = waiter.get("chat_id")
+                            if w_chat_id:
+                                w_is_group = w_chat_id < 0
+                                try:
+                                    cdata = json.loads(cache_raw)
+                                    base_c = (cdata.get("short_caption") if w_is_group else cdata.get("full_caption")) or cdata.get("full_caption") or cdata.get("short_caption") or cdata.get("title")
+                                except Exception:
+                                    base_c = None
+                                promo = f"\n\n📥 @{bot_username}" if bot_username else ""
+                                w_caption = f"{base_c}{promo}" if base_c else None
+                                if media_type == "photo":
+                                    await bot.send_photo(w_chat_id, file_id, caption=w_caption, reply_to_message_id=waiter.get("message_id"))
+                                elif media_type == "video":
+                                    await bot.send_video(w_chat_id, file_id, caption=w_caption, reply_to_message_id=waiter.get("message_id"), supports_streaming=True)
+                                else:
+                                    await bot.send_document(w_chat_id, file_id, caption=w_caption, reply_to_message_id=waiter.get("message_id"))
+                                log.info("sent cached to waiter chat=%s url=%s", w_chat_id, job.url)
                         except TelegramBadRequest as exc:
                             log.warning("failed to send cached to waiter chat=%s url=%s: %s", waiter.get("chat_id"), job.url, exc)
             await redis.delete(waiter_key)
@@ -366,6 +424,13 @@ async def main() -> None:
         raise RuntimeError("BOT_TOKEN is required")
     redis = Redis.from_url(settings.redis_url, decode_responses=True)
     bot = Bot(settings.bot_token, session=_bot_session())
+    bot_username: str | None = None
+    try:
+        me = await bot.get_me()
+        bot_username = me.username
+        log.info("worker running for bot @%s", bot_username)
+    except Exception as exc:
+        log.warning("failed to fetch bot username: %s", exc)
     try:
         await _clear_startup_queue(redis)
         while True:
@@ -381,7 +446,7 @@ async def main() -> None:
             except Exception:
                 log.exception("bad job payload: %r", raw)
                 continue
-            await process_job(redis, bot, job)
+            await process_job(redis, bot, job, bot_username=bot_username)
     finally:
         await bot.session.close()
         await redis.aclose()

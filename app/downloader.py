@@ -44,6 +44,9 @@ class DownloadItem:
     path: Path
     media_type: Literal["photo", "video", "document"]
     caption: str | None = None
+    title: str | None = None
+    short_caption: str | None = None
+    full_caption: str | None = None
     thumbnail_path: Path | None = None
     cover_path: Path | None = None
     width: int | None = None
@@ -382,8 +385,10 @@ def _sponsorblock_text(info: dict[str, Any]) -> str | None:
     return "\n".join(lines)
 
 
-def _caption_from_info(info: dict[str, Any], title_override: str | None = None) -> str | None:
+def _build_captions(info: dict[str, Any], title_override: str | None = None) -> tuple[str | None, str | None, str | None]:
     title = _clean_caption(str(title_override or info.get("title") or info.get("description") or ""))
+    title_html = f"<b>{html.escape(title)}</b>" if title else None
+
     details: list[str] = []
     chapters = info.get("chapters")
     if chapters:
@@ -394,18 +399,27 @@ def _caption_from_info(info: dict[str, Any], title_override: str | None = None) 
     if sb_text:
         details.append(sb_text)
 
-    if title and details:
-        result = f"<b>{html.escape(title)}</b>\n\n— — —\n\n" + "\n\n".join(details)
-    elif title:
-        result = html.escape(title)
+    short_caption = title_html
+    if title_html and details:
+        full_caption = f"{title_html}\n\n— — —\n\n" + "\n\n".join(details)
+    elif title_html:
+        full_caption = title_html
     elif details:
-        result = "\n\n".join(details)
+        full_caption = "\n\n".join(details)
     else:
-        result = None
+        full_caption = None
 
-    if result and len(result) > 1024:
-        result = result[:1021].rstrip() + "…"
-    return result
+    if full_caption and len(full_caption) > 1024:
+        full_caption = full_caption[:1021].rstrip() + "…"
+    if short_caption and len(short_caption) > 1024:
+        short_caption = short_caption[:1021].rstrip() + "…"
+
+    return title, short_caption, full_caption
+
+
+def _caption_from_info(info: dict[str, Any], title_override: str | None = None) -> str | None:
+    _, _, full = _build_captions(info, title_override=title_override)
+    return full
 
 
 def _youtube_video_id(url: str) -> str | None:
@@ -980,7 +994,8 @@ def _download_with_fallbacks(url: str, job_id: str, max_duration_seconds: int | 
                 yt_thumb = _move_thumbnail(thumbnail_path, job_id)
                 cover = yt_thumb or _extract_frame_cover(final, job_id)
                 log.info("downloaded job %s via yt-dlp: type=video path=%s cover=%s", job_id, final, bool(cover))
-                caption = _caption_from_info(info, title_override=_youtube_localized_title(url))
+                title, short_caption, full_caption = _build_captions(info, title_override=_youtube_localized_title(url))
+                caption = full_caption
 
                 # Extract accurate dimensions & duration from ffprobe or info dict
                 probe = _run_ffprobe(final)
@@ -1001,6 +1016,9 @@ def _download_with_fallbacks(url: str, job_id: str, max_duration_seconds: int | 
                             path=final,
                             media_type="video",
                             caption=caption,
+                            title=title,
+                            short_caption=short_caption,
+                            full_caption=full_caption,
                             thumbnail_path=cover,
                             cover_path=cover,
                             width=width,
