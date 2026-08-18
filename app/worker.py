@@ -483,4 +483,9 @@ async def main() -> None:
 
 
 if __name__ == "__main__":
+    try:
+        import uvloop
+        uvloop.install()
+    except ImportError:
+        pass
     asyncio.run(main())
