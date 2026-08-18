@@ -40,6 +40,14 @@ class SubscriptionMiddleware(BaseMiddleware):
         if not user:
             return await handler(event, data)
 
+        # Only enforce subscription check in private chats (личка с ботом).
+        # In group chats, supergroups, and channels (chat_id < 0), allow downloading without subscription check.
+        chat = getattr(event, "chat", None)
+        if not chat and isinstance(event, CallbackQuery) and event.message:
+            chat = event.message.chat
+        if chat and chat.type != "private":
+            return await handler(event, data)
+
         # Allow admins without check
         if user.id in settings.admin_ids:
             return await handler(event, data)
