@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
 import subprocess
 import time
 from pathlib import Path
@@ -129,9 +130,12 @@ def _legacy_media_cache_key(url: str) -> str:
 
 def _format_caption_for_chat(item: DownloadItem, chat_id: int, bot_username: str | None = None) -> str | None:
     is_group = chat_id < 0
+    # In group chats: short caption (title only + promo)
+    # In private chats: full caption (title + chapters + sponsorblock + promo)
     base = (item.short_caption if is_group else item.full_caption) or item.caption
     if not base:
         return None
+    base = re.sub(r'<[^>]+>', '', base).strip()
     promo = f"\n\n📥 @{bot_username}" if bot_username else ""
     caption = f"{base}{promo}"
     if len(caption) > 1024:
@@ -161,6 +165,7 @@ async def _try_send_cached(redis: Redis, bot: Bot, job: MediaJob, bot_username: 
         file_id = data.get("file_id")
         base_caption = (data.get("short_caption") if is_group else data.get("full_caption")) or data.get("full_caption") or data.get("short_caption") or data.get("title")
     except Exception:
+        # Fallback for old tab-separated format
         media_type, file_id, base_caption = (raw.split("\t", 2) + [None, None, None])[:3]
 
     if media_type not in {"photo", "video", "document"} or not file_id:
@@ -169,6 +174,7 @@ async def _try_send_cached(redis: Redis, bot: Bot, job: MediaJob, bot_username: 
 
     promo = f"\n\n📥 @{bot_username}" if bot_username else ""
     if base_caption:
+        base_caption = re.sub(r'<[^>]+>', '', base_caption).strip()
         caption = f"{base_caption}{promo}"
         if len(caption) > 1024:
             avail = 1024 - len(promo) - 3

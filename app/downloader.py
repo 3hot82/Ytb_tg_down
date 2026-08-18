@@ -302,6 +302,7 @@ def _select_safe_telegram_format(info: dict[str, Any], max_bytes: int) -> tuple[
 
 def _clean_caption(text: str) -> str | None:
     text = html.unescape(text).strip()
+    text = re.sub(r'<[^>]+>', '', text)
     if not text or text.lower() in {"none", "untitled"}:
         return None
     text = " ".join(text.split())
@@ -387,7 +388,7 @@ def _sponsorblock_text(info: dict[str, Any]) -> str | None:
 
 def _build_captions(info: dict[str, Any], title_override: str | None = None) -> tuple[str | None, str | None, str | None]:
     title = _clean_caption(str(title_override or info.get("title") or info.get("description") or ""))
-    title_html = f"<b>{html.escape(title)}</b>" if title else None
+    title_text = f"🎬 {title}" if title else None
 
     details: list[str] = []
     chapters = info.get("chapters")
@@ -399,11 +400,11 @@ def _build_captions(info: dict[str, Any], title_override: str | None = None) -> 
     if sb_text:
         details.append(sb_text)
 
-    short_caption = title_html
-    if title_html and details:
-        full_caption = f"{title_html}\n\n— — —\n\n" + "\n\n".join(details)
-    elif title_html:
-        full_caption = title_html
+    short_caption = title_text
+    if title_text and details:
+        full_caption = f"{title_text}\n\n— — —\n\n" + "\n\n".join(details)
+    elif title_text:
+        full_caption = title_text
     elif details:
         full_caption = "\n\n".join(details)
     else:
