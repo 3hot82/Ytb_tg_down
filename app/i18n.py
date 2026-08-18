@@ -252,19 +252,60 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
             "⏱ Time taken: <b>{duration:.1f}s</b>"
         ),
     },
-    "admin.broadcast_cancelled": {
-        "ru": "❌ Рассылка отменена.",
-        "en": "❌ Broadcast cancelled.",
+    # === Video captions / подписи ===
+    "caption.download_via": {
+        "ru": "📥 Скачано через @{bot_username}",
+        "en": "📥 Downloaded via @{bot_username}",
+    },
+    "caption.promo": {
+        "ru": "📥 Скачать видео через бота @{bot_username}",
+        "en": "📥 Download videos via bot @{bot_username}",
+    },
+    "caption.skip_ads": {
+        "ru": "Пропуск рекламы:",
+        "en": "Skip sponsor segments:",
+    },
+    "caption.after": {
+        "ru": "после:",
+        "en": "after:",
+    },
+    "caption.from": {
+        "ru": "с",
+        "en": "from",
     },
 }
 
+# Коды языков стран СНГ и русскоязычного пространства, которые мапятся на русский
+CIS_LANGUAGES = frozenset({
+    "ru",  # Русский (Россия, СНГ)
+    "uk",  # Украинский
+    "be",  # Белорусский
+    "kk",  # Казахский
+    "uz",  # Узбекский
+    "ky",  # Кыргызский
+    "tg",  # Таджикский
+    "tk",  # Туркменский
+    "az",  # Азербайджанский
+    "hy",  # Армянский
+    "ka",  # Грузинский
+    "mo",  # Молдавский
+    "ro",  # Румынский / Молдова
+    "tt",  # Татарский
+    "ba",  # Башкирский
+    "cv",  # Чувашский
+    "os",  # Осетинский
+})
+
 
 def detect_language(language_code: str | None) -> str:
-    """Detects default language code ('ru' or 'en')."""
+    """Определяет язык интерфейса ('ru' или 'en').
+    Для пользователей из стран СНГ (RU, UK, BE, KK, UZ, KY, TG, AZ, HY, KA и др.) — русский язык ('ru').
+    Для всех остальных стран и языков мира — английский ('en').
+    """
     if not language_code:
         return "ru"
-    code = language_code.lower().strip()
-    if code.startswith(("ru", "be", "kk", "uk", "uz")):
+    code = language_code.lower().strip().replace("-", "_").split("_")[0]
+    if code in CIS_LANGUAGES:
         return "ru"
     return "en"
 

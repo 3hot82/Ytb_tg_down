@@ -17,8 +17,19 @@ from redis.asyncio import Redis
 
 from .config import settings
 from .downloader import DownloadItem, DownloadRejected, cleanup_file, describe_media, download_media
+from .i18n import detect_language, t
 from .models import MediaJob
-from .redis_keys import ACTIVE_JOBS, JOB_PREFIX, MEDIA_CACHE_PREFIX, PAUSE_FLAG, PENDING_JOBS_CHAT_PREFIX, PENDING_JOBS_USER_PREFIX, URL_INFLIGHT_PREFIX, URL_WAITERS_PREFIX
+from .redis_keys import (
+    ACTIVE_JOBS,
+    JOB_PREFIX,
+    MEDIA_CACHE_PREFIX,
+    PAUSE_FLAG,
+    PENDING_JOBS_CHAT_PREFIX,
+    PENDING_JOBS_USER_PREFIX,
+    URL_INFLIGHT_PREFIX,
+    URL_WAITERS_PREFIX,
+    USER_LANG_PREFIX,
+)
 
 log = logging.getLogger(__name__)
 
@@ -128,7 +139,7 @@ def _legacy_media_cache_key(url: str) -> str:
     return f"{MEDIA_CACHE_PREFIX}{url}"
 
 
-def _format_caption_for_chat(item: DownloadItem, chat_id: int, bot_username: str | None = None) -> str | None:
+def _format_caption_for_chat(item: DownloadItem, chat_id: int, bot_username: str | None = None, lang: str = "ru") -> str | None:
     is_group = chat_id < 0
     # In group chats: short caption (title only + promo)
     # In private chats: full caption (title + chapters + sponsorblock + promo)
@@ -136,7 +147,8 @@ def _format_caption_for_chat(item: DownloadItem, chat_id: int, bot_username: str
     if not base:
         return None
     base = re.sub(r'<[^>]+>', '', base).strip()
-    promo = f"\n\n📥 @{bot_username}" if bot_username else ""
+    promo_text = t("caption.download_via", lang, bot_username=bot_username) if bot_username else ""
+    promo = f"\n\n{promo_text}" if promo_text else ""
     caption = f"{base}{promo}"
     if len(caption) > 1024:
         avail = 1024 - len(promo) - 3
@@ -147,7 +159,7 @@ def _format_caption_for_chat(item: DownloadItem, chat_id: int, bot_username: str
     return caption
 
 
-async def _try_send_cached(redis: Redis, bot: Bot, job: MediaJob, bot_username: str | None = None) -> bool:
+async def _try_send_cached(redis: Redis, bot: Bot, job: MediaJob, bot_username: str | None = None, lang: str = "ru") -> bool:
     cache_key = _media_cache_key(job.url)
     legacy_key = _legacy_media_cache_key(job.url)
     if job.force_download:
@@ -172,7 +184,8 @@ async def _try_send_cached(redis: Redis, bot: Bot, job: MediaJob, bot_username: 
         await redis.delete(cache_key)
         return False
 
-    promo = f"\n\n📥 @{bot_username}" if bot_username else ""
+    promo_text = t("caption.download_via", lang, bot_username=bot_username) if bot_username else ""
+    promo = f"\n\n{promo_text}" if promo_text else ""
     if base_caption:
         base_caption = re.sub(r'<[^>]+>', '', base_caption).strip()
         caption = f"{base_caption}{promo}"
@@ -192,7 +205,7 @@ async def _try_send_cached(redis: Redis, bot: Bot, job: MediaJob, bot_username: 
             await bot.send_video(job.chat_id, file_id, caption=caption, reply_to_message_id=job.message_id, supports_streaming=True)
         else:
             await bot.send_document(job.chat_id, file_id, caption=caption, reply_to_message_id=job.message_id)
-        log.info("job %s sent from telegram file_id cache url=%s type=%s is_group=%s", job.id, job.url, media_type, is_group)
+        log.info("job %s sent from telegram file_id cache url=%s type=%s is_group=%s lang=%s", job.id, job.url, media_type, is_group, lang)
         return True
     except TelegramBadRequest as exc:
         await redis.delete(cache_key)
@@ -257,6 +270,17 @@ async def process_job(redis: Redis, bot: Bot, job: MediaJob, bot_username: str |
     loop = asyncio.get_running_loop()
     last_progress = 0.0
 
+    # Determine user/chat language from Redis (default 'ru' for CIS, 'en' for others)
+    lang = "ru"
+    if job.user_id:
+        raw_lang = await redis.get(f"{USER_LANG_PREFIX}{job.user_id}")
+        if raw_lang:
+            lang = raw_lang.decode("utf-8") if isinstance(raw_lang, bytes) else raw_lang
+    elif job.chat_id:
+        raw_lang = await redis.get(f"{USER_LANG_PREFIX}{job.chat_id}")
+        if raw_lang:
+            lang = raw_lang.decode("utf-8") if isinstance(raw_lang, bytes) else raw_lang
+
     def progress_hook(data: dict) -> None:
         nonlocal last_progress
         now = time.monotonic()
@@ -270,21 +294,21 @@ async def process_job(redis: Redis, bot: Bot, job: MediaJob, bot_username: str |
             percent = min(downloaded / total * 100, 100)
             downloaded_mb = downloaded / 1024 / 1024
             total_mb = total / 1024 / 1024
-            text = f"⬇️ Скачиваю: {percent:.1f}% ({downloaded_mb:.0f}/{total_mb:.0f} MB)"
+            text = f"⬇️ Скачиваю: {percent:.1f}% ({downloaded_mb:.0f}/{total_mb:.0f} MB)" if lang == "ru" else f"⬇️ Downloading: {percent:.1f}% ({downloaded_mb:.0f}/{total_mb:.0f} MB)"
         elif status == "finished":
-            text = "⚙️ Обрабатываю видео…"
+            text = "⚙️ Обрабатываю видео…" if lang == "ru" else "⚙️ Processing media…"
         else:
             return
         loop.call_soon_threadsafe(lambda: asyncio.create_task(_set_progress(bot, job, text)))
 
     try:
-        if await _try_send_cached(redis, bot, job, bot_username=bot_username):
-            await _set_progress(bot, job, "✅ Отправил из кэша")
+        if await _try_send_cached(redis, bot, job, bot_username=bot_username, lang=lang):
+            await _set_progress(bot, job, "✅ Отправил из кэша" if lang == "ru" else "✅ Sent from cache")
             return
         is_admin = job.user_id is not None and job.user_id in settings.admin_ids
         max_duration = 0 if is_admin else settings.max_duration_seconds
         timeout_seconds = None if is_admin else settings.download_timeout_seconds
-        await _set_progress(bot, job, "🔎 Проверяю ссылку…")
+        await _set_progress(bot, job, "🔎 Проверяю ссылку…" if lang == "ru" else "🔎 Checking link…")
         result = await download_media(
             job.url,
             job.id,
@@ -292,7 +316,7 @@ async def process_job(redis: Redis, bot: Bot, job: MediaJob, bot_username: str |
             progress_hook=progress_hook,
             timeout_seconds=timeout_seconds,
         )
-        await _set_progress(bot, job, "📤 Отправляю видео…")
+        await _set_progress(bot, job, "📤 Отправляю видео…" if lang == "ru" else "📤 Uploading media…")
         media_info = describe_media(result.path)
         items = result.all_items()
         cache_enabled = len(items) == 1
@@ -300,7 +324,7 @@ async def process_job(redis: Redis, bot: Bot, job: MediaJob, bot_username: str |
         for item in items:
             if item.path.stat().st_size > settings.max_file_bytes:
                 raise DownloadRejected(f"Файл больше {settings.max_file_mb} MB.")
-            caption = _format_caption_for_chat(item, job.chat_id, bot_username=bot_username)
+            caption = _format_caption_for_chat(item, job.chat_id, bot_username=bot_username, lang=lang)
             if item.media_type == "photo":
                 sent = await bot.send_photo(
                     chat_id=job.chat_id,
@@ -309,7 +333,7 @@ async def process_job(redis: Redis, bot: Bot, job: MediaJob, bot_username: str |
                     reply_to_message_id=job.message_id,
                 )
                 await _cache_sent_message(redis, job, "photo", sent, item, enabled=cache_enabled)
-                await _set_progress(bot, job, "✅ Фото отправлено")
+                await _set_progress(bot, job, "✅ Фото отправлено" if lang == "ru" else "✅ Photo sent")
             elif item.media_type == "video":
                 generated_thumbnail = None
                 thumbnail = item.thumbnail_path
@@ -331,7 +355,7 @@ async def process_job(redis: Redis, bot: Bot, job: MediaJob, bot_username: str |
                         height=item.height,
                     )
                     await _cache_sent_message(redis, job, "video", sent, item, enabled=cache_enabled)
-                    await _set_progress(bot, job, "✅ Видео отправлено")
+                    await _set_progress(bot, job, "✅ Видео отправлено" if lang == "ru" else "✅ Video sent")
                 finally:
                     if generated_thumbnail:
                         generated_thumbnail.unlink(missing_ok=True)
@@ -343,7 +367,7 @@ async def process_job(redis: Redis, bot: Bot, job: MediaJob, bot_username: str |
                     reply_to_message_id=job.message_id,
                 )
                 await _cache_sent_message(redis, job, "document", sent, item, enabled=cache_enabled)
-                await _set_progress(bot, job, "✅ Файл отправлен")
+                await _set_progress(bot, job, "✅ Файл отправлен" if lang == "ru" else "✅ File sent")
     except DownloadRejected as exc:
         await _send_error(bot, job, f"Не могу скачать: {exc}")
     except asyncio.TimeoutError:
