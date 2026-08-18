@@ -21,7 +21,7 @@ from redis.asyncio import Redis
 from . import admin
 from .config import settings
 from .i18n import detect_language, t
-from .middlewares import SubscriptionMiddleware
+from .middlewares import RateLimitMiddleware, SubscriptionMiddleware, rate_limit_cleanup_loop
 from .models import MediaJob
 from .redis_keys import (
     JOB_PREFIX,
@@ -756,6 +756,9 @@ async def main() -> None:
     bot = Bot(settings.bot_token, session=_bot_session(), default=DefaultBotProperties(parse_mode=ParseMode.HTML))
     dp = Dispatcher()
 
+    # Rate limiting middleware (in-memory, 5 req/min per user)
+    dp.message.middleware(RateLimitMiddleware())
+
     # Middleware for forced subscription check
     sub_middleware = SubscriptionMiddleware(redis)
     dp.message.outer_middleware(sub_middleware)
@@ -766,9 +769,11 @@ async def main() -> None:
     dp.include_router(router)
 
     await _setup_bot_commands(bot)
+    cleanup_task = asyncio.create_task(rate_limit_cleanup_loop())
     try:
         await dp.start_polling(bot)
     finally:
+        cleanup_task.cancel()
         await bot.session.close()
         await redis.aclose()
 

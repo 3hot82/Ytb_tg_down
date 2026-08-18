@@ -269,9 +269,10 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
         "ru": "после:",
         "en": "after:",
     },
-    "caption.from": {
-        "ru": "с",
-        "en": "from",
+    # === Rate limit ===
+    "error.rate_limit": {
+        "ru": "⏳ <b>Слишком много запросов!</b>\nПожалуйста, подождите <b>{seconds} сек.</b> перед отправкой следующей ссылки.",
+        "en": "⏳ <b>Too many requests!</b>\nPlease wait <b>{seconds} sec.</b> before sending another link.",
     },
 }
 
