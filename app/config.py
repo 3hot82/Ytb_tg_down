@@ -69,6 +69,7 @@ class Settings:
     data_dir: str = os.getenv("DATA_DIR", "/app/data")
     auth_browser_url: str = os.getenv("AUTH_BROWSER_URL", "http://127.0.0.1:33000/")
     browser_profile_path: str = os.getenv("BROWSER_PROFILE_PATH", "/browser-profile/.config/chromium")
+    bgutil_base_url: str = os.getenv("BGUTIL_BASE_URL", "http://bgutil:4416")
     admin_ids: frozenset[int] = _int_set("ADMIN_IDS")
     log_level: str = os.getenv("LOG_LEVEL", "INFO")
 

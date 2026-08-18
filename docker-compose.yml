@@ -30,6 +30,7 @@ services:
     env_file: .env
     depends_on:
       - redis
+      - bgutil
     volumes:
       - ./app:/app/app
       - ytdlp-bin:/opt/ytdlp
@@ -43,12 +44,20 @@ services:
     env_file: .env
     depends_on:
       - redis
+      - bgutil
     volumes:
       - ./app:/app/app
       - downloads:/app/downloads
       - ytdlp-bin:/opt/ytdlp
       - cookies-data:/app/data
     command: ["python", "-m", "app.worker"]
+
+  bgutil:
+    image: brainicism/bgutil-ytdlp-pot-provider:latest
+    restart: unless-stopped
+    init: true
+    environment:
+      - PORT=4416
 
   watcher:
     build: .

@@ -81,6 +81,7 @@ def _base_opts(workdir: Path) -> dict[str, Any]:
         "paths": {"home": str(workdir)},
         "overwrites": True,
         "external_downloader_args": {"ffmpeg_i": ["-c", "copy"]},
+        "extractor_args": _youtube_extractor_args(),
     }
     cookies = _cookie_file_for_url(workdir)
     # Placeholder, replaced by _ytdlp_opts_for_url where URL is known.
@@ -144,6 +145,7 @@ def _is_video_only_codec(fmt: dict[str, Any], codec_mode: str) -> bool:
 
 
 def _youtube_extractor_args() -> dict[str, dict[str, list[str]]]:
+    ea: dict[str, dict[str, list[str]]] = {}
     youtube_args: dict[str, list[str]] = {}
     if settings.youtube_multi_audio and settings.youtube_player_client:
         youtube_args["player_client"] = [settings.youtube_player_client]
@@ -152,7 +154,14 @@ def _youtube_extractor_args() -> dict[str, dict[str, list[str]]]:
         # yt-dlp passes this as YouTube UI/API language (`hl`), so titles/descriptions
         # use YouTube's own localized values when the creator provided them.
         youtube_args["lang"] = [settings.youtube_audio_language]
-    return {"youtube": youtube_args} if youtube_args else {}
+    if youtube_args:
+        ea["youtube"] = youtube_args
+
+    base_pot = (settings.bgutil_base_url or "").strip()
+    if base_pot:
+        ea["youtubepot-bgutilhttp"] = {"base_url": [base_pot]}
+
+    return ea
 
 
 def _language_audio_selectors(base_selector: str, *, ext: str | None = None, acodec: str | None = None) -> str:
