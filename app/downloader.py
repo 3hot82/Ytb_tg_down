@@ -105,7 +105,11 @@ def _filesize_ok(path: Path) -> bool:
 
 
 def _format_height(fmt: dict[str, Any]) -> int:
-    return int(fmt.get("height") or 0)
+    h = int(fmt.get("height") or 0)
+    w = int(fmt.get("width") or 0)
+    if h > 0 and w > 0:
+        return min(h, w)
+    return h
 
 
 def _format_size_bytes(fmt: dict[str, Any], duration: float | None = None) -> int | None:
@@ -122,7 +126,7 @@ def _format_size_bytes(fmt: dict[str, Any], duration: float | None = None) -> in
 def _is_premerged_h264_aac(fmt: dict[str, Any]) -> bool:
     vcodec = str(fmt.get("vcodec") or "")
     acodec = str(fmt.get("acodec") or "")
-    return fmt.get("ext") == "mp4" and vcodec.startswith("avc1") and acodec.startswith("mp4a")
+    return fmt.get("ext") == "mp4" and (vcodec.startswith("avc1") or vcodec.startswith("h264")) and (acodec.startswith("mp4a") or acodec.startswith("aac"))
 
 
 def _is_video_only_codec(fmt: dict[str, Any], codec_mode: str) -> bool:
@@ -203,7 +207,13 @@ def _fallback_selector_for_mode(codec_mode: str) -> str:
             _video_with_audio_selector("bestvideo[ext=mp4][vcodec^=avc1][height<=480]", codec_mode),
             _video_with_audio_selector("bestvideo[ext=mp4][vcodec^=avc1][height<=360]", codec_mode),
         ])
-    return "best[ext=mp4][vcodec^=avc1][acodec^=mp4a][height<=480]/best[ext=mp4][vcodec^=avc1][acodec^=mp4a][height<=360]/best[ext=mp4][vcodec^=avc1][acodec^=mp4a]"
+    return (
+        "bestvideo[height<=960][width<=960][vcodec~='^(avc|h264)']+bestaudio[ext=m4a]"
+        "/best[ext=mp4][vcodec^=avc1][acodec^=mp4a][height<=480]"
+        "/best[ext=mp4][vcodec^=avc1][acodec^=mp4a][height<=360]"
+        "/bestvideo[height<=960][width<=960]+bestaudio"
+        "/best"
+    )
 
 
 def _codec_mode() -> str:
@@ -233,43 +243,56 @@ def _select_safe_telegram_format(info: dict[str, Any], max_bytes: int) -> tuple[
                     return selector, True, mode
         raise DownloadRejected(f"Даже 360p в режиме {mode} по оценке больше {settings.max_file_mb} MB.")
 
+    # MP4 mode:
+    # 1. Video-only H.264 formats (DASH)
+    video_only_candidates = [
+        f for f in info.get("formats") or []
+        if f.get("ext") == "mp4" and str(f.get("vcodec") or "").startswith(("avc1", "h264")) and f.get("acodec") == "none"
+    ]
+    # 2. Audio-only formats
+    audio_candidates = [f for f in info.get("formats") or [] if f.get("acodec") != "none" and f.get("vcodec") == "none"]
+    audio_size = min((_format_size_bytes(f, duration_f) or 0 for f in audio_candidates), default=0)
 
-    if settings.youtube_multi_audio and settings.youtube_audio_language:
-        video_candidates = [
-            f for f in info.get("formats") or []
-            if f.get("ext") == "mp4" and str(f.get("vcodec") or "").startswith("avc1") and f.get("acodec") == "none"
-        ]
-        audio_candidates = [f for f in info.get("formats") or [] if f.get("acodec") != "none" and f.get("vcodec") == "none"]
-        audio_size = min((_format_size_bytes(f, duration_f) or 0 for f in audio_candidates), default=0)
-        for max_height in (480, 360):
-            matching = [f for f in video_candidates if 0 < _format_height(f) <= max_height]
-            for fmt in sorted(matching, key=_format_height, reverse=True):
-                size = _format_size_bytes(fmt, duration_f)
-                total_size = (size or 0) + audio_size if size else None
-                if total_size is None or total_size <= max_bytes:
-                    selector = _video_with_audio_selector(str(fmt.get("format_id")), "mp4")
-                    log.info(
-                        "selected safe yt-dlp format id=%s mode=mp4 audio_language=%s height=%s estimated_size=%s max=%s",
-                        fmt.get("format_id"),
-                        settings.youtube_audio_language,
-                        fmt.get("height"),
-                        total_size,
-                        max_bytes,
-                    )
-                    return selector, True, "mp4"
-        log.warning("no safe h264 video-only format for requested YouTube audio language; falling back to premerged mp4")
+    # 3. Premerged H.264+AAC formats
+    premerged_candidates = [f for f in info.get("formats") or [] if _is_premerged_h264_aac(f)]
 
-    candidates = [f for f in info.get("formats") or [] if _is_premerged_h264_aac(f)]
-    if not candidates:
-        return _fallback_selector_for_mode("mp4"), False, "mp4"
-
+    # Check 480p first, then 360p
     for max_height in (480, 360):
-        matching = [f for f in candidates if 0 < _format_height(f) <= max_height]
-        for fmt in sorted(matching, key=_format_height, reverse=True):
+        # A) Check premerged at this resolution
+        matching_pre = [f for f in premerged_candidates if _format_height(f) == max_height]
+        for fmt in sorted(matching_pre, key=_format_height, reverse=True):
             size = _format_size_bytes(fmt, duration_f)
             if size is None or size <= max_bytes:
-                log.info("selected safe yt-dlp format id=%s mode=mp4 height=%s estimated_size=%s max=%s", fmt.get("format_id"), fmt.get("height"), size, max_bytes)
+                log.info("selected safe premerged yt-dlp format id=%s height=%s estimated_size=%s max=%s", fmt.get("format_id"), fmt.get("height"), size, max_bytes)
                 return str(fmt.get("format_id")), False, "mp4"
+
+        # B) Check DASH video-only (H.264) + audio (AAC) stream copy merge
+        matching_dash = [f for f in video_only_candidates if _format_height(f) == max_height]
+        for fmt in sorted(matching_dash, key=_format_height, reverse=True):
+            size = _format_size_bytes(fmt, duration_f)
+            total_size = (size or 0) + audio_size if size else None
+            if total_size is None or total_size <= max_bytes:
+                selector = _video_with_audio_selector(str(fmt.get("format_id")), "mp4")
+                log.info("selected safe DASH stream-copy yt-dlp format id=%s height=%s estimated_size=%s max=%s", fmt.get("format_id"), fmt.get("height"), total_size, max_bytes)
+                return selector, True, "mp4"
+
+    # Any matching premerged <= 480
+    for fmt in sorted(premerged_candidates, key=_format_height, reverse=True):
+        if 0 < _format_height(fmt) <= 480:
+            size = _format_size_bytes(fmt, duration_f)
+            if size is None or size <= max_bytes:
+                return str(fmt.get("format_id")), False, "mp4"
+
+    # Any matching DASH <= 480
+    for fmt in sorted(video_only_candidates, key=_format_height, reverse=True):
+        if 0 < _format_height(fmt) <= 480:
+            size = _format_size_bytes(fmt, duration_f)
+            total_size = (size or 0) + audio_size if size else None
+            if total_size is None or total_size <= max_bytes:
+                return _video_with_audio_selector(str(fmt.get("format_id")), "mp4"), True, "mp4"
+
+    if not premerged_candidates and not video_only_candidates:
+        return _fallback_selector_for_mode("mp4"), True, "mp4"
 
     raise DownloadRejected(f"Даже 360p по оценке больше {settings.max_file_mb} MB.")
 
@@ -655,7 +678,7 @@ def _download_ytdlp_video(url: str, workdir: Path, fmt: str, *, merge: bool = Fa
                     {"key": "FFmpegThumbnailsConvertor", "format": "jpg", "when": "before_dl"},
                     {"key": "FFmpegMetadata"},
                 ],
-                "postprocessor_args": {"ffmpeg": ["-movflags", "+faststart"]},
+                "postprocessor_args": {"ffmpeg": ["-c", "copy", "-movflags", "+faststart"]},
             }
         )
     with YoutubeDL(opts) as ydl:
