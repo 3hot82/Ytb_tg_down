@@ -21,6 +21,15 @@ from redis.asyncio import Redis
 
 from . import admin
 from .config import settings
+from .database import (
+    delete_cached_media as db_delete_cached_media,
+    get_cached_media as db_get_cached_media,
+    get_required_channels as db_get_required_channels,
+    get_user_lang as db_get_user_lang,
+    init_db,
+    set_user_lang as db_set_user_lang,
+    upsert_user,
+)
 from .i18n import detect_language, t
 from .middlewares import RateLimitMiddleware, SubscriptionMiddleware, rate_limit_cleanup_loop
 from .models import MediaJob
@@ -96,9 +105,21 @@ async def _track_user(user: Any) -> None:
         return
     try:
         await redis.sadd(USERS_ALL, str(user.id))
+        lang = None
         if not await redis.exists(f"{USER_LANG_PREFIX}{user.id}"):
-            default_lang = detect_language(getattr(user, "language_code", None))
-            await redis.set(f"{USER_LANG_PREFIX}{user.id}", default_lang)
+            sqlite_lang = await db_get_user_lang(user.id)
+            if sqlite_lang:
+                lang = sqlite_lang
+                await redis.set(f"{USER_LANG_PREFIX}{user.id}", lang)
+            else:
+                lang = detect_language(getattr(user, "language_code", None))
+                await redis.set(f"{USER_LANG_PREFIX}{user.id}", lang)
+        await upsert_user(
+            user_id=user.id,
+            username=getattr(user, "username", None),
+            first_name=getattr(user, "first_name", None),
+            lang=lang,
+        )
     except Exception as exc:
         log.debug("failed to track user %s: %s", getattr(user, "id", None), exc)
 
@@ -177,9 +198,21 @@ def _extract_supported_url(text: str | None) -> str | None:
 async def _try_send_cached(message: Message, url: str) -> bool:
     assert redis is not None
     raw = await redis.get(f"{MEDIA_CACHE_PREFIX}{url}")
-    if not raw:
-        return False
-    media_type, file_id, caption = (raw.split("\t", 2) + [None, None, None])[:3]
+    media_type, file_id, caption = None, None, None
+
+    if raw:
+        media_type, file_id, caption = (raw.split("\t", 2) + [None, None, None])[:3]
+    else:
+        # Fallback to SQLite permanent cache
+        cached = await db_get_cached_media(url)
+        if cached:
+            media_type = cached.get("media_type")
+            file_id = cached.get("file_id")
+            caption = cached.get("full_caption") or cached.get("short_caption") or cached.get("title")
+            # Populate back to Redis
+            if media_type and file_id:
+                await redis.set(f"{MEDIA_CACHE_PREFIX}{url}", f"{media_type}\t{file_id}\t{caption or ''}", ex=settings.media_cache_ttl_seconds)
+
     if media_type not in {"photo", "video", "document"} or not file_id:
         await redis.delete(f"{MEDIA_CACHE_PREFIX}{url}")
         return False
@@ -194,6 +227,7 @@ async def _try_send_cached(message: Message, url: str) -> bool:
         return True
     except TelegramBadRequest as exc:
         await redis.delete(f"{MEDIA_CACHE_PREFIX}{url}")
+        await db_delete_cached_media(url)
         log.warning("telegram file_id cache failed for %s, invalidating and queueing: %s", url, exc)
         return False
 
@@ -511,6 +545,7 @@ async def cb_set_lang(callback: CallbackQuery) -> None:
         return
     new_lang = "ru" if callback.data == "set_lang_ru" else "en"
     await redis.set(f"{USER_LANG_PREFIX}{callback.from_user.id}", new_lang)
+    await db_set_user_lang(callback.from_user.id, new_lang)
     await _track_user(callback.from_user)
     if callback.message:
         await callback.message.edit_text(t("lang.changed", new_lang))
@@ -758,9 +793,20 @@ async def main() -> None:
     if not settings.bot_token:
         raise RuntimeError("BOT_TOKEN is required")
 
+    await init_db()
+
     global redis
     redis = Redis.from_url(settings.redis_url, decode_responses=True)
     admin.set_redis(redis)
+
+    # Sync required channels from SQLite to Redis if Redis was restarted
+    try:
+        sqlite_channels = await db_get_required_channels()
+        if sqlite_channels and not await redis.exists(REQUIRED_CHANNELS):
+            for ch in sqlite_channels:
+                await redis.hset(REQUIRED_CHANNELS, str(ch["channel_id"]), json.dumps(ch))
+    except Exception as exc:
+        log.warning("Failed to sync required channels from SQLite: %s", exc)
 
     bot = Bot(settings.bot_token, session=_bot_session(), default=DefaultBotProperties(parse_mode=ParseMode.HTML))
     dp = Dispatcher()

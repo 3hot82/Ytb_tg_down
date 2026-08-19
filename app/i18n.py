@@ -274,6 +274,40 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
         "ru": "⏳ <b>Слишком много запросов!</b>\nПожалуйста, подождите <b>{seconds} сек.</b> перед отправкой следующей ссылки.",
         "en": "⏳ <b>Too many requests!</b>\nPlease wait <b>{seconds} sec.</b> before sending another link.",
     },
+    # === User Download Errors (Private chat) ===
+    "error.unavailable": {
+        "ru": "🔒 <b>Это видео недоступно, удалено автором или является приватным.</b>",
+        "en": "🔒 <b>This video is unavailable, deleted, or private.</b>",
+    },
+    "error.size_limit": {
+        "ru": "📦 <b>Файл превышает допустимый лимит размера Telegram (2 ГБ).</b>",
+        "en": "📦 <b>File exceeds the Telegram size limit (2 GB).</b>",
+    },
+    "error.timeout": {
+        "ru": "⏱ <b>Время ожидания загрузки истекло. Попробуйте повторить чуть позже.</b>",
+        "en": "⏱ <b>Download timed out. Please try again a bit later.</b>",
+    },
+    "error.service_restricted": {
+        "ru": "⏳ <b>Сервис временно ограничил загрузку этого видео. Попробуйте чуть позже.</b>",
+        "en": "⏳ <b>Download temporarily restricted by the service. Please try again later.</b>",
+    },
+    "error.generic": {
+        "ru": "⚠️ <b>Не удалось скачать медиа по этой ссылке.</b>",
+        "en": "⚠️ <b>Failed to download media from this link.</b>",
+    },
+    # === Group Chat Short Errors (Supergroups) ===
+    "error.group_unavailable": {
+        "ru": "❌ Видео недоступно или удалено",
+        "en": "❌ Video unavailable or deleted",
+    },
+    "error.group_size_limit": {
+        "ru": "❌ Файл превышает лимит размера (2 ГБ)",
+        "en": "❌ File size exceeds limit (2 GB)",
+    },
+    "error.group_generic": {
+        "ru": "❌ Ошибка скачивания",
+        "en": "❌ Download error",
+    },
 }
 
 # Коды языков стран СНГ и русскоязычного пространства, которые мапятся на русский

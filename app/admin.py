@@ -15,6 +15,12 @@ from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMar
 from redis.asyncio import Redis
 
 from .config import settings
+from .database import (
+    add_required_channel as db_add_required_channel,
+    delete_required_channel as db_delete_required_channel,
+    get_all_user_ids as db_get_all_user_ids,
+    get_users_stats as db_get_users_stats,
+)
 from .i18n import detect_language, t
 from .redis_keys import (
     ACTIVE_JOBS,
@@ -122,7 +128,9 @@ async def cb_admin_stats(callback: CallbackQuery) -> None:
         return
     lang = await get_admin_lang(callback.from_user.id, callback.from_user.language_code)
 
-    total_users = await redis.scard(USERS_ALL)
+    db_stats = await db_get_users_stats()
+    redis_users = await redis.scard(USERS_ALL)
+    total_users = max(db_stats.get("total_users", 0), redis_users)
     channels_count = await redis.hlen(REQUIRED_CHANNELS)
     queue_len = await redis.llen(settings.queue_name)
     ytdlp_ver = await redis.get(YTDLP_UPDATED_VERSION)
@@ -136,6 +144,11 @@ async def cb_admin_stats(callback: CallbackQuery) -> None:
         queue_len=queue_len,
         ytdlp_version=ytdlp_version_str,
     )
+    if db_stats.get("total_downloads") is not None:
+        text += (
+            f"\n\n💾 <b>Всего скачиваний (БД):</b> {db_stats['total_downloads']}\n"
+            f"👥 <b>Активных за 24ч:</b> {db_stats['active_24h']}"
+        )
     kb = InlineKeyboardMarkup(
         inline_keyboard=[
             [InlineKeyboardButton(text=t("admin.btn_back", lang), callback_data="admin_menu")]
@@ -196,6 +209,10 @@ async def cb_del_channel(callback: CallbackQuery) -> None:
         return
     chan_id = callback.data.removeprefix("del_chan_")
     await redis.hdel(REQUIRED_CHANNELS, chan_id)
+    try:
+        await db_delete_required_channel(int(chan_id))
+    except Exception:
+        pass
     lang = await get_admin_lang(callback.from_user.id, callback.from_user.language_code)
     await callback.answer(t("admin.channel_deleted", lang), show_alert=True)
     await cb_admin_channels(callback)
@@ -297,6 +314,7 @@ async def process_channel_link(message: Message, state: FSMContext) -> None:
     data = await state.get_data()
     channel_id = data["channel_id"]
     title = data["title"]
+    username = data.get("username")
 
     chan_info = {
         "channel_id": channel_id,
@@ -304,6 +322,10 @@ async def process_channel_link(message: Message, state: FSMContext) -> None:
         "invite_link": invite_link,
     }
     await redis.hset(REQUIRED_CHANNELS, str(channel_id), json.dumps(chan_info))
+    try:
+        await db_add_required_channel(channel_id, title, username, invite_link)
+    except Exception as exc:
+        log.warning("Failed to save channel to SQLite: %s", exc)
     await state.clear()
 
     await message.answer(
@@ -411,17 +433,18 @@ async def run_broadcast(
     admin_lang: str,
 ) -> None:
     assert redis is not None
-    user_ids_raw = await redis.smembers(USERS_ALL)
-    total = len(user_ids_raw)
+    user_ids_set = {int(x) for x in await redis.smembers(USERS_ALL) if str(x).isdigit()}
+    sqlite_uids = await db_get_all_user_ids()
+    user_ids_set.update(sqlite_uids)
+    total = len(user_ids_set)
     success = 0
     blocked = 0
     errors = 0
     start_time = time.monotonic()
 
     log.info("starting broadcast to %d users", total)
-    for raw_uid in user_ids_raw:
+    for uid in user_ids_set:
         try:
-            uid = int(raw_uid)
             await bot.copy_message(
                 chat_id=uid,
                 from_chat_id=src_chat_id,
@@ -431,7 +454,7 @@ async def run_broadcast(
         except TelegramForbiddenError:
             blocked += 1
             # User blocked bot - remove from active set
-            await redis.srem(USERS_ALL, raw_uid)
+            await redis.srem(USERS_ALL, str(uid))
         except TelegramRetryAfter as e:
             await asyncio.sleep(e.retry_after)
             try:

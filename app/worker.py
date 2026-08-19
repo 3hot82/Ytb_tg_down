@@ -15,7 +15,15 @@ from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError
 from aiogram.types import FSInputFile, Message
 from redis.asyncio import Redis
 
+from .alerts import get_user_friendly_error, send_admin_alert
 from .config import settings
+from .database import (
+    delete_cached_media as db_delete_cached_media,
+    get_cached_media as db_get_cached_media,
+    increment_user_downloads as db_increment_user_downloads,
+    init_db,
+    save_cached_media as db_save_cached_media,
+)
 from .downloader import DownloadItem, DownloadRejected, cleanup_file, describe_media, download_media
 from .i18n import detect_language, t
 from .models import MediaJob
@@ -88,11 +96,13 @@ async def _set_progress(bot: Bot, job: MediaJob, text: str) -> None:
 
 async def _send_error(bot: Bot, job: MediaJob, text: str) -> None:
     if _progress_target(job):
-        await _set_progress(bot, job, f"❌ {text}")
+        await _set_progress(bot, job, text)
         return
-    msg = await bot.send_message(job.chat_id, text, reply_to_message_id=job.message_id)
-    await asyncio.sleep(10)
-    await _delete_message(bot, job.chat_id, msg.message_id)
+    msg = await bot.send_message(job.chat_id, text, reply_to_message_id=job.message_id, parse_mode="HTML")
+    # For group chats, auto-delete error message after 15 seconds to prevent spam
+    if job.chat_id < 0:
+        await asyncio.sleep(15)
+        await _delete_message(bot, job.chat_id, msg.message_id)
 
 
 
@@ -164,21 +174,33 @@ async def _try_send_cached(redis: Redis, bot: Bot, job: MediaJob, bot_username: 
     legacy_key = _legacy_media_cache_key(job.url)
     if job.force_download:
         await redis.delete(cache_key, legacy_key)
+        await db_delete_cached_media(job.url)
         log.info("job %s bypassed and cleared telegram file_id cache url=%s", job.id, job.url)
         return False
     raw = await redis.get(cache_key)
-    if not raw:
-        return False
 
     is_group = job.chat_id < 0
-    try:
-        data = json.loads(raw)
-        media_type = data.get("media_type")
-        file_id = data.get("file_id")
-        base_caption = (data.get("short_caption") if is_group else data.get("full_caption")) or data.get("full_caption") or data.get("short_caption") or data.get("title")
-    except Exception:
-        # Fallback for old tab-separated format
-        media_type, file_id, base_caption = (raw.split("\t", 2) + [None, None, None])[:3]
+    data = None
+    if raw:
+        try:
+            data = json.loads(raw)
+        except Exception:
+            media_type, file_id, base_caption = (raw.split("\t", 2) + [None, None, None])[:3]
+            data = {"media_type": media_type, "file_id": file_id, "full_caption": base_caption}
+    else:
+        # Fallback to SQLite permanent cache
+        sqlite_cached = await db_get_cached_media(job.url)
+        if sqlite_cached:
+            data = sqlite_cached
+            # Populate back to Redis
+            await redis.set(cache_key, json.dumps(data, ensure_ascii=False), ex=settings.media_cache_ttl_seconds)
+
+    if not data:
+        return False
+
+    media_type = data.get("media_type")
+    file_id = data.get("file_id")
+    base_caption = (data.get("short_caption") if is_group else data.get("full_caption")) or data.get("full_caption") or data.get("short_caption") or data.get("title")
 
     if media_type not in {"photo", "video", "document"} or not file_id:
         await redis.delete(cache_key)
@@ -209,6 +231,7 @@ async def _try_send_cached(redis: Redis, bot: Bot, job: MediaJob, bot_username: 
         return True
     except TelegramBadRequest as exc:
         await redis.delete(cache_key)
+        await db_delete_cached_media(job.url)
         log.warning("telegram file_id cache failed for %s, invalidating: %s", job.url, exc)
         return False
 
@@ -250,7 +273,15 @@ async def _cache_sent_message(
         json.dumps(payload, ensure_ascii=False),
         ex=settings.media_cache_ttl_seconds,
     )
-    log.info("cached telegram file_id for url=%s type=%s ttl=%s", job.url, media_type, settings.media_cache_ttl_seconds)
+    await db_save_cached_media(
+        url=job.url,
+        media_type=media_type,
+        file_id=file_id,
+        title=item.title,
+        short_caption=item.short_caption,
+        full_caption=item.full_caption or item.caption,
+    )
+    log.info("cached telegram file_id in Redis and SQLite for url=%s type=%s ttl=%s", job.url, media_type, settings.media_cache_ttl_seconds)
 
 
 
@@ -368,14 +399,22 @@ async def process_job(redis: Redis, bot: Bot, job: MediaJob, bot_username: str |
                 )
                 await _cache_sent_message(redis, job, "document", sent, item, enabled=cache_enabled)
                 await _set_progress(bot, job, "✅ Файл отправлен" if lang == "ru" else "✅ File sent")
+        if job.user_id:
+            await db_increment_user_downloads(job.user_id)
     except DownloadRejected as exc:
-        await _send_error(bot, job, f"Не могу скачать: {exc}")
-    except asyncio.TimeoutError:
-        await _send_error(bot, job, "Загрузка заняла слишком много времени и остановлена.")
+        err_text = get_user_friendly_error(exc, lang=lang, is_group=is_group)
+        await _send_error(bot, job, err_text)
+        await send_admin_alert(bot, redis, exc, url=job.url, user_id=job.user_id, chat_id=job.chat_id)
+    except asyncio.TimeoutError as exc:
+        err_text = get_user_friendly_error(exc, lang=lang, is_group=is_group)
+        await _send_error(bot, job, err_text)
         log.exception("job timeout: %s", job.id)
+        await send_admin_alert(bot, redis, exc, url=job.url, user_id=job.user_id, chat_id=job.chat_id)
     except Exception as exc:  # noqa: BLE001 - worker must survive bad URLs/sites
-        await _send_error(bot, job, "Не удалось скачать это медиа.")
+        err_text = get_user_friendly_error(exc, lang=lang, is_group=is_group)
+        await _send_error(bot, job, err_text)
         log.exception("job failed %s: %s", job.id, exc)
+        await send_admin_alert(bot, redis, exc, url=job.url, user_id=job.user_id, chat_id=job.chat_id)
     finally:
         if result:
             for item in result.all_items():
@@ -452,6 +491,7 @@ async def main() -> None:
     logging.basicConfig(level=settings.log_level, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
     if not settings.bot_token:
         raise RuntimeError("BOT_TOKEN is required")
+    await init_db()
     redis = Redis.from_url(settings.redis_url, decode_responses=True)
     bot = Bot(settings.bot_token, session=_bot_session())
     bot_username: str | None = None
