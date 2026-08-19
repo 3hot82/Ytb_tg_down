@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from datetime import datetime, timezone
 import json
 import logging
 from io import BytesIO
@@ -241,6 +242,14 @@ async def _release_pending(jobs: list[MediaJob]) -> None:
 
 async def _queue_urls(message: Message, urls: list[str], *, force_download: bool = False) -> None:
     assert redis is not None
+    # Drop stale messages (older than 2 minutes) to prevent backlog processing upon restart
+    if message.date:
+        msg_date = message.date if message.date.tzinfo else message.date.replace(tzinfo=timezone.utc)
+        age = (datetime.now(timezone.utc) - msg_date).total_seconds()
+        if age > 120:
+            log.warning("ignoring stale message age=%.1fs chat=%s msg_id=%s", age, message.chat.id, message.message_id)
+            return
+
     await _track_user(message.from_user)
     user_id = message.from_user.id if message.from_user else None
     user_lang = await _get_user_lang(user_id, message.from_user.language_code if message.from_user else None)
@@ -771,7 +780,8 @@ async def main() -> None:
     await _setup_bot_commands(bot)
     cleanup_task = asyncio.create_task(rate_limit_cleanup_loop())
     try:
-        await dp.start_polling(bot)
+        await bot.delete_webhook(drop_pending_updates=True)
+        await dp.start_polling(bot, drop_pending_updates=True)
     finally:
         cleanup_task.cancel()
         await bot.session.close()
